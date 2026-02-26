@@ -18,12 +18,11 @@ package com.androidacy.apifier.client
 import android.util.Log
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
-import java.net.DatagramSocket
 import java.net.IDN
 import java.net.Inet4Address
-import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.Socket
 import java.net.URL
 import java.net.URLEncoder
 import java.security.KeyStore
@@ -500,23 +499,19 @@ internal class DohResolver(private val config: DohConfig) {
         throw Exception("DNS name extends beyond packet")
     }
 
-    /**
-     * Probe IPv6 reachability by attempting a UDP socket connect to a known-good
-     * IPv6 address. A UDP connect doesn't send traffic — it just checks if the OS
-     * has a route. Tries [IPV6_PROBE_ATTEMPTS] times to handle transient failures.
-     */
+    /** TCP connect to a known-good IPv6 address. Fails if IPv6 is blocked upstream. */
     private fun probeIpv6(): Boolean {
         val target = InetSocketAddress(
-            InetAddress.getByName(IPV6_PROBE_ADDRESS) as Inet6Address, 53
+            InetAddress.getByName(IPV6_PROBE_ADDRESS), IPV6_PROBE_PORT
         )
         var successes = 0
         for (i in 0 until IPV6_PROBE_ATTEMPTS) {
             try {
-                DatagramSocket().use { sock ->
-                    sock.connect(target)
-                    if (sock.isConnected) successes++
+                Socket().use { sock ->
+                    sock.connect(target, IPV6_PROBE_TIMEOUT_MS)
+                    successes++
                 }
-            } catch (_: Exception) { /* no route to IPv6 */ }
+            } catch (_: Exception) { /* TCP handshake failed — IPv6 unreachable */ }
         }
         val available = successes >= IPV6_PROBE_THRESHOLD
         Log.d(TAG, "IPv6 probe: $successes/$IPV6_PROBE_ATTEMPTS succeeded, available=$available")
@@ -531,6 +526,8 @@ internal class DohResolver(private val config: DohConfig) {
         private val SAFE_HOSTNAME = Regex("""^[a-zA-Z0-9._-]+$""")
         private val IPV4_PATTERN = Regex("""\d{1,3}(\.\d{1,3}){3}""")
         private const val IPV6_PROBE_ADDRESS = "2001:4860:4860::8888"
+        private const val IPV6_PROBE_PORT = 443
+        private const val IPV6_PROBE_TIMEOUT_MS = 2000
         private const val IPV6_PROBE_ATTEMPTS = 3
         private const val IPV6_PROBE_THRESHOLD = 2
     }
