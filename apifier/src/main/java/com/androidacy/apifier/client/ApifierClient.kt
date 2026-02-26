@@ -27,6 +27,12 @@ import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 
+/** Tag marker to skip automatic retries on a per-request basis. */
+object NoRetry
+
+/** Marks this request to skip automatic retries. */
+fun Request.Builder.noRetry(): Request.Builder = tag(NoRetry::class.java, NoRetry)
+
 class ApifierClient(context: Context, config: NetworkConfig) {
 
     val client: OkHttpClient = HttpClientBuilder(context, config).build()

@@ -1,6 +1,7 @@
 plugins {
     id("com.android.library")
-    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.dokka")
+    id("org.jetbrains.dokka-javadoc")
     `maven-publish`
 }
 
@@ -30,6 +31,7 @@ android {
     }
 
     kotlin {
+        jvmToolchain(17)
         compilerOptions {
             jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
         }
@@ -38,7 +40,6 @@ android {
     publishing {
         singleVariant("release") {
             withSourcesJar()
-            withJavadocJar()
         }
     }
 }
@@ -51,7 +52,6 @@ dependencies {
     api("com.google.android.gms:play-services-cronet:18.1.1")
     api("org.chromium.net:cronet-api:101.4951.41")
     implementation("org.chromium.net:cronet-embedded:113.5672.61")
-    implementation("com.google.net.cronet:cronet-okhttp:0.1.0")
 
     // Kotlin coroutines
     api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
@@ -61,14 +61,20 @@ dependencies {
     implementation("androidx.core:core-ktx:1.17.0")
 }
 
+val dokkaJavadocJar by tasks.registering(Jar::class) {
+    from(tasks.dokkaGeneratePublicationJavadoc.flatMap { it.outputDirectory })
+    archiveClassifier.set("javadoc")
+}
+
 afterEvaluate {
     publishing {
         publications {
             create<MavenPublication>("release") {
                 from(components["release"])
+                artifact(dokkaJavadocJar)
                 groupId = "com.github.Androidacy"
                 artifactId = "android-apifier"
-                version = "1.0.0"
+                version = "1.2.0"
 
                 pom {
                     name.set("Android Apifier")

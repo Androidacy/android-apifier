@@ -15,7 +15,6 @@
  */
 package com.androidacy.apifier.patterns
 
-import kotlin.math.min
 import kotlin.math.pow
 import kotlin.random.Random
 
@@ -42,14 +41,13 @@ class ExponentialBackoff(private val config: BackoffConfig = BackoffConfig()) {
         if (attemptNumber < 0) return 0
 
         val exponent = attemptNumber.coerceAtMost(20)
-        val exponentialDelay = (config.baseDelayMs * config.multiplier.pow(exponent))
+        val delay = (config.baseDelayMs * config.multiplier.pow(exponent))
             .toLong()
             .coerceAtMost(config.maxDelayMs)
 
-        val cappedDelay = min(exponentialDelay, config.maxDelayMs)
-        val jitter = (cappedDelay * config.jitterFactor * Random.nextDouble()).toLong()
+        val jitter = (delay * config.jitterFactor * Random.nextDouble()).toLong()
 
-        return cappedDelay + jitter
+        return delay + jitter
     }
 
     fun shouldRetry(attemptNumber: Int): Boolean = attemptNumber < config.maxAttempts

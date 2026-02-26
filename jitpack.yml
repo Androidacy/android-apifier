@@ -3,5 +3,7 @@ jdk:
 before_install:
   - sdk install java 17.0.11-tem
   - sdk use java 17.0.11-tem
+  - yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+  - $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-36" "build-tools;36.0.0"
 install:
   - ./gradlew :apifier:publishToMavenLocal

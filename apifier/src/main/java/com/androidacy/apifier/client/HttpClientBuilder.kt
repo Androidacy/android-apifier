@@ -22,7 +22,6 @@ import com.androidacy.apifier.progress.ProgressResponseBody
 import com.androidacy.apifier.security.SecureCookieJar
 import com.google.android.gms.net.CronetProviderInstaller
 import com.google.android.gms.tasks.Tasks
-import com.google.net.cronet.okhttptransport.CronetInterceptor
 import okhttp3.ConnectionPool
 import okhttp3.ConnectionSpec
 import okhttp3.Cookie
@@ -41,6 +40,9 @@ class HttpClientBuilder(
     private val context: Context,
     private val config: NetworkConfig
 ) {
+    companion object {
+        private val IDEMPOTENT_METHODS = setOf("GET", "HEAD")
+    }
 
     fun build(): OkHttpClient {
         val builder = OkHttpClient.Builder().apply {
@@ -56,7 +58,8 @@ class HttpClientBuilder(
 
         val cookieJar = config.cookieStorage?.let { SecureCookieJar(it) }
         builder.addInterceptor(createMainInterceptor(cookieJar))
-        builder.addInterceptor(CronetInterceptor.newBuilder(createCronetEngine()).build())
+
+        builder.addInterceptor(CronetCallInterceptor(createCronetEngine()))
 
         return builder.build()
     }
@@ -86,8 +89,10 @@ class HttpClientBuilder(
         var attempt = 0
         var lastException: IOException? = null
         val backoff = ExponentialBackoff()
+        val maxAttempts = if (chain.request().tag(NoRetry::class.java) != null) 1
+            else config.retryConfig.maxAttempts
 
-        while (attempt < config.retryConfig.maxAttempts) {
+        while (attempt < maxAttempts) {
             val originalRequest = chain.request()
             val req = originalRequest.newBuilder().apply {
                 config.headers.forEach { (name, value) -> header(name, value) }
@@ -100,9 +105,9 @@ class HttpClientBuilder(
 
             try {
                 val resp = chain.proceed(req)
-                val isIdempotent = req.method in setOf("GET", "HEAD")
+                val isIdempotent = req.method in IDEMPOTENT_METHODS
 
-                if (resp.code >= 500 && attempt < config.retryConfig.maxAttempts - 1 &&
+                if (resp.code >= 500 && attempt < maxAttempts - 1 &&
                     config.retryConfig.retryOn5xx &&
                     (!config.retryConfig.retryIdempotentOnly || isIdempotent)
                 ) {
@@ -130,8 +135,8 @@ class HttpClientBuilder(
 
             } catch (e: IOException) {
                 lastException = e
-                val isIdempotent = req.method in setOf("GET", "HEAD")
-                if (attempt < config.retryConfig.maxAttempts - 1 &&
+                val isIdempotent = req.method in IDEMPOTENT_METHODS
+                if (attempt < maxAttempts - 1 &&
                     (!config.retryConfig.retryIdempotentOnly || isIdempotent)
                 ) {
                     attempt++
