@@ -15,6 +15,8 @@
  */
 package com.androidacy.apifier.client
 
+import android.os.Looper
+import android.util.Log
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Protocol
@@ -38,7 +40,6 @@ import java.util.concurrent.TimeUnit
 
 /** OkHttp interceptor that routes requests through a [CronetEngine] for QUIC/HTTP3 support. */
 class CronetCallInterceptor private constructor(
-    private val engineProvider: () -> CronetEngine,
     private val rebuildCheck: () -> CronetEngine,
     private val resolver: DohResolver?,
     private val executor: Executor
@@ -51,7 +52,6 @@ class CronetCallInterceptor private constructor(
             Thread(r, "Cronet-IO").apply { isDaemon = true }
         }
     ) : this(
-        engineProvider = { engineManager.getEngine() },
         rebuildCheck = { engineManager.rebuildIfDirty() },
         resolver = resolver,
         executor = executor
@@ -63,13 +63,13 @@ class CronetCallInterceptor private constructor(
             Thread(r, "Cronet-IO").apply { isDaemon = true }
         }
     ) : this(
-        engineProvider = { engine },
         rebuildCheck = { engine },
         resolver = null,
         executor = executor
     )
 
     companion object {
+        private const val TAG = "CronetCallInterceptor"
         private const val READ_BUFFER_SIZE = 32 * 1024
         private const val PIPE_BUFFER_SIZE = 256L * 1024
         private const val MAX_REDIRECTS = 20
@@ -77,6 +77,10 @@ class CronetCallInterceptor private constructor(
     }
 
     override fun intercept(chain: Interceptor.Chain): Response {
+        if (Looper.getMainLooper().isCurrentThread) {
+            Log.w(TAG, "HTTP request on main thread — this will block the UI and may cause ANR")
+        }
+
         val request = chain.request()
 
         resolver?.resolve(request.url.host)

@@ -49,6 +49,9 @@ class HttpClientBuilder(
     companion object {
         private const val TAG = "HttpClientBuilder"
         private val IDEMPOTENT_METHODS = setOf("GET", "HEAD")
+        private const val SHUTDOWN_MAX_ATTEMPTS = 5
+        private const val SHUTDOWN_RETRY_DELAY_MS = 200L
+        private const val OLD_ENGINE_CLEANUP_DELAY_S = 10L
     }
 
     fun build(): OkHttpClient {
@@ -182,20 +185,47 @@ class HttpClientBuilder(
             private set
 
         private val rebuildLock = Any()
-
-        fun getEngine(): CronetEngine = currentEngine
+        private val shutdownExecutor = Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "Cronet-Shutdown").apply { isDaemon = true }
+        }
 
         fun rebuildIfDirty(): CronetEngine {
             if (resolver == null) return currentEngine
             synchronized(rebuildLock) {
                 if (!resolver.consumeRulesDirty()) return currentEngine
-                currentEngine = buildEngine()
+                val oldEngine = currentEngine
+
+                // Try to shut down old engine (releases disk cache lock).
+                // Retry briefly — we're on an IO thread, not main.
+                var shutdownOk = false
+                for (attempt in 0 until SHUTDOWN_MAX_ATTEMPTS) {
+                    try {
+                        oldEngine.shutdown()
+                        shutdownOk = true
+                        break
+                    } catch (e: Exception) {
+                        if (attempt < SHUTDOWN_MAX_ATTEMPTS - 1) Thread.sleep(SHUTDOWN_RETRY_DELAY_MS)
+                    }
+                }
+
+                if (shutdownOk) {
+                    currentEngine = buildEngine(useDiskCache = true)
+                } else {
+                    // Active requests prevent shutdown — rebuild with in-memory cache
+                    // to avoid disk lock contention while still applying new DNS rules
+                    Log.w(TAG, "Old engine busy, rebuilding with in-memory cache to avoid DNS leak")
+                    currentEngine = buildEngine(useDiskCache = false)
+                    // Clean up old engine once its requests drain
+                    shutdownExecutor.schedule({
+                        try { oldEngine.shutdown() } catch (_: Exception) {}
+                    }, OLD_ENGINE_CLEANUP_DELAY_S, TimeUnit.SECONDS)
+                }
                 return currentEngine
             }
         }
 
         @Suppress("UnsafeOptInUsageError", "DEPRECATION")
-        private fun buildEngine(): CronetEngine {
+        private fun buildEngine(useDiskCache: Boolean = true): CronetEngine {
             val providers = try {
                 Tasks.await(CronetProviderInstaller.installProvider(context))
                 CronetProvider.getAllProviders(context)
@@ -240,12 +270,16 @@ class HttpClientBuilder(
                     )
                 }
 
-                config.cronetConfig.cacheDirectory?.let { dir ->
-                    if (!dir.exists() && !dir.mkdirs()) {
-                        throw IOException("Failed to create cronet cache directory")
+                if (useDiskCache) {
+                    config.cronetConfig.cacheDirectory?.let { dir ->
+                        if (!dir.exists() && !dir.mkdirs()) {
+                            throw IOException("Failed to create cronet cache directory")
+                        }
+                        setStoragePath(dir.absolutePath)
+                        enableHttpCache(CronetEngine.Builder.HTTP_CACHE_DISK, config.cronetConfig.cacheSizeBytes)
                     }
-                    setStoragePath(dir.absolutePath)
-                    enableHttpCache(CronetEngine.Builder.HTTP_CACHE_DISK, config.cronetConfig.cacheSizeBytes)
+                } else {
+                    enableHttpCache(CronetEngine.Builder.HTTP_CACHE_IN_MEMORY, config.cronetConfig.cacheSizeBytes)
                 }
 
                 enablePublicKeyPinningBypassForLocalTrustAnchors(false)
