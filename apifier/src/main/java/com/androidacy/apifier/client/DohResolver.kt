@@ -18,9 +18,12 @@ package com.androidacy.apifier.client
 import android.util.Log
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.net.DatagramSocket
 import java.net.IDN
 import java.net.Inet4Address
+import java.net.Inet6Address
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.URL
 import java.net.URLEncoder
 import java.security.KeyStore
@@ -34,15 +37,6 @@ import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManagerFactory
 
 internal class DohResolver(private val config: DohConfig) {
-
-    companion object {
-        private const val TAG = "DohResolver"
-        private const val DNS_TYPE_A = 1
-        private const val DNS_TYPE_AAAA = 28
-        private const val MAX_DNS_RESPONSE_SIZE = 65536 // 64KB
-        private val SAFE_HOSTNAME = Regex("""^[a-zA-Z0-9._-]+$""")
-        private val IPV4_PATTERN = Regex("""\d{1,3}(\.\d{1,3}){3}""")
-    }
 
     internal data class DnsRecord(
         val hostname: String,
@@ -83,6 +77,7 @@ internal class DohResolver(private val config: DohConfig) {
     private val providerHealth = ConcurrentHashMap<DohProvider, ProviderHealth>()
     private val rulesDirty = AtomicBoolean(false)
     private val dohSslSocketFactory: SSLSocketFactory = createSystemOnlySslSocketFactory()
+    @Volatile private var ipv6Available: Boolean = probeIpv6()
 
     fun resolve(hostname: String): List<String>? {
         if (isIpAddress(hostname)) return null
@@ -132,7 +127,15 @@ internal class DohResolver(private val config: DohConfig) {
         val rules = cache.values
             .filter { record -> SAFE_HOSTNAME.matches(record.hostname) }
             .joinToString(", ") { record ->
-                "MAP ${record.hostname} ${record.addresses.first()}"
+                // HostResolverRules only accept a single address, bypassing Cronet's
+                // own Happy Eyeballs. Pick based on probed IPv6 reachability.
+                val ip = if (ipv6Available) {
+                    record.addresses.first()
+                } else {
+                    record.addresses.firstOrNull { !it.contains(':') }
+                        ?: record.addresses.first()
+                }
+                "MAP ${record.hostname} $ip"
             }
         return rules.ifEmpty { null }
     }
@@ -495,5 +498,40 @@ internal class DohResolver(private val config: DohConfig) {
             if (++jumps > 128) throw Exception("DNS name too long or pointer loop")
         }
         throw Exception("DNS name extends beyond packet")
+    }
+
+    /**
+     * Probe IPv6 reachability by attempting a UDP socket connect to a known-good
+     * IPv6 address. A UDP connect doesn't send traffic — it just checks if the OS
+     * has a route. Tries [IPV6_PROBE_ATTEMPTS] times to handle transient failures.
+     */
+    private fun probeIpv6(): Boolean {
+        val target = InetSocketAddress(
+            InetAddress.getByName(IPV6_PROBE_ADDRESS) as Inet6Address, 53
+        )
+        var successes = 0
+        for (i in 0 until IPV6_PROBE_ATTEMPTS) {
+            try {
+                DatagramSocket().use { sock ->
+                    sock.connect(target)
+                    if (sock.isConnected) successes++
+                }
+            } catch (_: Exception) { /* no route to IPv6 */ }
+        }
+        val available = successes >= IPV6_PROBE_THRESHOLD
+        Log.d(TAG, "IPv6 probe: $successes/$IPV6_PROBE_ATTEMPTS succeeded, available=$available")
+        return available
+    }
+
+    companion object {
+        private const val TAG = "DohResolver"
+        private const val DNS_TYPE_A = 1
+        private const val DNS_TYPE_AAAA = 28
+        private const val MAX_DNS_RESPONSE_SIZE = 65536
+        private val SAFE_HOSTNAME = Regex("""^[a-zA-Z0-9._-]+$""")
+        private val IPV4_PATTERN = Regex("""\d{1,3}(\.\d{1,3}){3}""")
+        private const val IPV6_PROBE_ADDRESS = "2001:4860:4860::8888"
+        private const val IPV6_PROBE_ATTEMPTS = 3
+        private const val IPV6_PROBE_THRESHOLD = 2
     }
 }
