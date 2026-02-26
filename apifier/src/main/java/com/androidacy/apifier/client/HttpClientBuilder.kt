@@ -285,20 +285,12 @@ class HttpClientBuilder(
                 enablePublicKeyPinningBypassForLocalTrustAnchors(false)
             }
 
-            // Build experimental options JSON for features needing it
+            // Apply HostResolverRules via experimental options if DoH resolver has rules
             val hostRules = resolver?.buildHostResolverRules()
-            val enabledFeatures = mutableListOf<String>()
-            if (config.cronetConfig.enableZstd) enabledFeatures.add("EnableZstdV2")
-
-            if (hostRules != null || enabledFeatures.isNotEmpty()) {
+            if (hostRules != null) {
                 val experimentalJson = JSONObject().apply {
-                    if (hostRules != null) {
-                        put("HostResolverRules", JSONObject().put("host_resolver_rules", hostRules))
-                        put("AsyncDNS", JSONObject().put("enable", true))
-                    }
-                    if (enabledFeatures.isNotEmpty()) {
-                        put("feature_list", JSONObject().put("enable", enabledFeatures.joinToString(",")))
-                    }
+                    put("HostResolverRules", JSONObject().put("host_resolver_rules", hostRules))
+                    put("AsyncDNS", JSONObject().put("enable", true))
                 }.toString()
                 applyExperimentalOptions(builder, experimentalJson)
             }

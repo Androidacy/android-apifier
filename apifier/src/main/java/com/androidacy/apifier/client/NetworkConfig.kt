@@ -73,7 +73,6 @@ data class CronetConfig(
     val enableQuic: Boolean = true,
     val enableHttp2: Boolean = true,
     val enableBrotli: Boolean = true,
-    val enableZstd: Boolean = true,
     val quicHints: List<Pair<String, Int>> = emptyList(),
     val cacheDirectory: File? = null,
     val cacheSizeBytes: Long = 256 * 1024 * 1024, // 256MB default
@@ -176,7 +175,6 @@ class CronetConfigBuilder {
     var enableQuic = true
     var enableHttp2 = true
     var enableBrotli = true
-    var enableZstd = true
     var quicHints = mutableListOf<Pair<String, Int>>()
     var cacheDirectory: File? = null
     var cacheSizeBytes: Long = 256 * 1024 * 1024
@@ -193,7 +191,7 @@ class CronetConfigBuilder {
     }
 
     fun build() = CronetConfig(
-        enableQuic, enableHttp2, enableBrotli, enableZstd, quicHints,
+        enableQuic, enableHttp2, enableBrotli, quicHints,
         cacheDirectory, cacheSizeBytes, enableDnsOverHttps, enableStaleDns,
         dohConfig
     )
