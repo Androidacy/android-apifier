@@ -73,7 +73,7 @@ class CronetCallInterceptor private constructor(
         private const val READ_BUFFER_SIZE = 32 * 1024
         private const val PIPE_BUFFER_SIZE = 256L * 1024
         private const val MAX_REDIRECTS = 20
-        private val ENCODINGS_HANDLED_BY_CRONET = setOf("br", "deflate", "gzip", "x-gzip")
+        private val ENCODINGS_HANDLED_BY_CRONET = setOf("br", "deflate", "gzip", "x-gzip", "zstd")
     }
 
     override fun intercept(chain: Interceptor.Chain): Response {

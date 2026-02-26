@@ -50,8 +50,8 @@ dependencies {
 
     // Cronet
     api("com.google.android.gms:play-services-cronet:18.1.1")
-    api("org.chromium.net:cronet-api:101.4951.41")
-    implementation("org.chromium.net:cronet-embedded:113.5672.61")
+    api("org.chromium.net:cronet-api:143.7445.0")
+    implementation("org.chromium.net:cronet-embedded:143.7445.0")
 
     // Kotlin coroutines
     api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
@@ -77,7 +77,7 @@ afterEvaluate {
                 artifact(dokkaJavadocJar)
                 groupId = "com.github.Androidacy"
                 artifactId = "android-apifier"
-                version = "1.3.2"
+                version = "1.4.0"
 
                 pom {
                     name.set("Android Apifier")
