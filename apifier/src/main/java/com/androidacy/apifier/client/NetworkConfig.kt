@@ -21,6 +21,7 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
+/** Top-level configuration for [ApifierClient]. */
 data class NetworkConfig(
     val cronetConfig: CronetConfig = CronetConfig(),
     val timeouts: TimeoutConfig = TimeoutConfig(),
@@ -31,6 +32,43 @@ data class NetworkConfig(
     val dynamicHeaders: Map<String, () -> String> = emptyMap()
 )
 
+/** DNS-over-HTTPS provider endpoints. Uses IP-based URLs to avoid bootstrap DNS dependency. */
+enum class DohProvider(val endpoint: String) {
+    CLOUDFLARE_PRIMARY("https://1.1.1.1/dns-query"),
+    CLOUDFLARE_SECONDARY("https://1.0.0.1/dns-query"),
+    GOOGLE_PRIMARY("https://8.8.8.8/dns-query"),
+    GOOGLE_SECONDARY("https://8.8.4.4/dns-query");
+
+    companion object {
+        val DEFAULT_CHAIN = entries
+    }
+}
+
+/** DoH resolution settings. Enabled by default with all providers. */
+data class DohConfig(
+    val enabled: Boolean = true,
+    val providers: List<DohProvider> = DohProvider.DEFAULT_CHAIN,
+    val fallbackToSystemDns: Boolean = true,
+    val preResolveDomains: List<String> = emptyList(),
+    val queryTimeoutMs: Int = 3000,
+    val maxTtlSeconds: Long = 300,
+    val minTtlSeconds: Long = 60,
+    val maxCacheEntries: Int = 100,
+    val useStaleCache: Boolean = true,
+    val staleCacheMaxAgeSeconds: Long = 3600
+) {
+    init {
+        require(queryTimeoutMs > 0) { "queryTimeoutMs must be positive" }
+        require(maxTtlSeconds >= minTtlSeconds) { "maxTtlSeconds must be >= minTtlSeconds" }
+        require(minTtlSeconds >= 0) { "minTtlSeconds must be non-negative" }
+        require(maxCacheEntries > 0) { "maxCacheEntries must be positive" }
+        if (enabled) {
+            require(providers.isNotEmpty()) { "providers must not be empty when DoH is enabled" }
+        }
+    }
+}
+
+/** Cronet engine transport settings. */
 data class CronetConfig(
     val enableQuic: Boolean = true,
     val enableHttp2: Boolean = true,
@@ -39,7 +77,8 @@ data class CronetConfig(
     val cacheDirectory: File? = null,
     val cacheSizeBytes: Long = 256 * 1024 * 1024, // 256MB default
     val enableDnsOverHttps: Boolean = true,
-    val enableStaleDns: Boolean = true
+    val enableStaleDns: Boolean = true,
+    val dohConfig: DohConfig = DohConfig()
 ) {
     init {
         require(cacheSizeBytes > 0) { "cacheSizeBytes must be positive" }
@@ -50,6 +89,7 @@ data class CronetConfig(
     }
 }
 
+/** OkHttp timeout durations. */
 data class TimeoutConfig(
     val connect: Duration = 5.seconds,
     val read: Duration = 60.seconds,
@@ -64,6 +104,7 @@ data class TimeoutConfig(
     }
 }
 
+/** OkHttp connection pool sizing. */
 data class ConnectionPoolConfig(
     val maxIdleConnections: Int = Runtime.getRuntime().availableProcessors() * 4,
     val keepAliveDuration: Duration = 2.minutes
@@ -74,6 +115,7 @@ data class ConnectionPoolConfig(
     }
 }
 
+/** Retry policy for failed requests. */
 data class RetryConfig(
     val maxAttempts: Int = 1,
     val retryOn5xx: Boolean = true,
@@ -84,6 +126,7 @@ data class RetryConfig(
     }
 }
 
+/** DSL builder for [NetworkConfig]. */
 class NetworkConfigBuilder {
     private var cronetConfig = CronetConfig()
     private var timeouts = TimeoutConfig()
@@ -127,6 +170,7 @@ class NetworkConfigBuilder {
     )
 }
 
+/** DSL builder for [CronetConfig]. */
 class CronetConfigBuilder {
     var enableQuic = true
     var enableHttp2 = true
@@ -136,17 +180,48 @@ class CronetConfigBuilder {
     var cacheSizeBytes: Long = 256 * 1024 * 1024
     var enableDnsOverHttps = true
     var enableStaleDns = true
+    private var dohConfig = DohConfig()
 
     fun quicHint(host: String, port: Int = 443, alternatePort: Int = 443) {
         quicHints.add(host to alternatePort)
     }
 
+    fun doh(block: DohConfigBuilder.() -> Unit) {
+        dohConfig = DohConfigBuilder().apply(block).build()
+    }
+
     fun build() = CronetConfig(
         enableQuic, enableHttp2, enableBrotli, quicHints,
-        cacheDirectory, cacheSizeBytes, enableDnsOverHttps, enableStaleDns
+        cacheDirectory, cacheSizeBytes, enableDnsOverHttps, enableStaleDns,
+        dohConfig
     )
 }
 
+/** DSL builder for [DohConfig]. */
+class DohConfigBuilder {
+    var enabled: Boolean = true
+    var providers: List<DohProvider> = DohProvider.DEFAULT_CHAIN
+    var fallbackToSystemDns: Boolean = true
+    var queryTimeoutMs: Int = 3000
+    var maxTtlSeconds: Long = 300
+    var minTtlSeconds: Long = 60
+    var maxCacheEntries: Int = 100
+    var useStaleCache: Boolean = true
+    var staleCacheMaxAgeSeconds: Long = 3600
+    private val preResolveDomains = mutableListOf<String>()
+
+    fun preResolve(vararg domains: String) {
+        preResolveDomains.addAll(domains)
+    }
+
+    fun build() = DohConfig(
+        enabled, providers, fallbackToSystemDns, preResolveDomains.toList(),
+        queryTimeoutMs, maxTtlSeconds, minTtlSeconds, maxCacheEntries,
+        useStaleCache, staleCacheMaxAgeSeconds
+    )
+}
+
+/** DSL builder for [TimeoutConfig]. */
 class TimeoutConfigBuilder {
     var connect: Duration = 5.seconds
     var read: Duration = 60.seconds
@@ -156,6 +231,7 @@ class TimeoutConfigBuilder {
     fun build() = TimeoutConfig(connect, read, write, call)
 }
 
+/** DSL builder for [ConnectionPoolConfig]. */
 class ConnectionPoolConfigBuilder {
     var maxIdleConnections: Int = Runtime.getRuntime().availableProcessors() * 4
     var keepAliveDuration: Duration = 2.minutes
@@ -163,6 +239,7 @@ class ConnectionPoolConfigBuilder {
     fun build() = ConnectionPoolConfig(maxIdleConnections, keepAliveDuration)
 }
 
+/** DSL builder for [RetryConfig]. */
 class RetryConfigBuilder {
     var maxAttempts: Int = 1
     var retryOn5xx: Boolean = true

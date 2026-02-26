@@ -19,8 +19,10 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 
+/** Android network connectivity helpers. */
 object NetworkUtils {
 
+    /** @return true if the device has a validated internet connection. */
     fun hasConnection(context: Context): Boolean {
         val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
             ?: return false

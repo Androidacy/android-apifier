@@ -25,6 +25,7 @@ import okio.buffer
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicLong
 
+/** [ResponseBody] wrapper that reports download progress to a [ProgressListener]. */
 class ProgressResponseBody(
     private val responseBody: ResponseBody,
     private val progressListener: ProgressListener

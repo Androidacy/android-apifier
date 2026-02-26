@@ -15,56 +15,62 @@
  */
 package com.androidacy.apifier.patterns
 
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
-
+/**
+ * Thread-safe circuit breaker (closed/open/half-open).
+ * @param failureThreshold consecutive failures before opening
+ * @param timeoutMs millis before transitioning open to half-open
+ */
 class CircuitBreaker(
     private val failureThreshold: Int = 5,
     private val timeoutMs: Long = 300_000L
 ) {
-    private val state = AtomicInteger(STATE_CLOSED)
-    private val failureCount = AtomicInteger(0)
-    private val lastFailureTime = AtomicLong(0L)
+    private var state = STATE_CLOSED
+    private var failureCount = 0
+    private var lastFailureTime = 0L
 
-    val isOpen: Boolean
-        get() = state.get() == STATE_OPEN
+    /** True when the breaker is open (rejecting calls). */
+    val isOpen: Boolean get() = synchronized(this) { state == STATE_OPEN }
 
-    val isClosed: Boolean
-        get() = state.get() == STATE_CLOSED
+    /** True when the breaker is closed (allowing calls). */
+    val isClosed: Boolean get() = synchronized(this) { state == STATE_CLOSED }
 
+    /** Record a successful call. Resets failure count; closes breaker if half-open. */
+    @Synchronized
     fun recordSuccess() {
-        when (state.get()) {
+        when (state) {
             STATE_HALF_OPEN -> reset()
-            STATE_CLOSED -> failureCount.set(0)
+            STATE_CLOSED -> failureCount = 0
         }
     }
 
+    /** Record a failed call. Opens breaker after [failureThreshold] consecutive failures. */
+    @Synchronized
     fun recordFailure() {
-        lastFailureTime.set(System.currentTimeMillis())
-
-        val count = failureCount.incrementAndGet()
-        if (count >= failureThreshold) {
-            state.compareAndSet(STATE_CLOSED, STATE_OPEN)
+        lastFailureTime = System.currentTimeMillis()
+        failureCount++
+        if (failureCount >= failureThreshold && state == STATE_CLOSED) {
+            state = STATE_OPEN
         }
     }
 
+    /** @return true if a call should be permitted (closed or half-open). */
+    @Synchronized
     fun checkState(): Boolean {
-        if (state.get() != STATE_OPEN) return true
+        if (state != STATE_OPEN) return true
 
-        val now = System.currentTimeMillis()
-        val elapsed = now - lastFailureTime.get()
-
-        if (elapsed >= timeoutMs && state.compareAndSet(STATE_OPEN, STATE_HALF_OPEN)) {
+        if (System.currentTimeMillis() - lastFailureTime >= timeoutMs) {
+            state = STATE_HALF_OPEN
             return true
         }
-
         return false
     }
 
+    /** Force-reset to closed state. */
+    @Synchronized
     fun reset() {
-        failureCount.set(0)
-        lastFailureTime.set(0L)
-        state.set(STATE_CLOSED)
+        failureCount = 0
+        lastFailureTime = 0L
+        state = STATE_CLOSED
     }
 
     companion object {

@@ -15,6 +15,12 @@
  */
 package com.androidacy.apifier.progress
 
+/** Callback for tracking download/upload byte progress. */
 interface ProgressListener {
+    /**
+     * @param bytesRead total bytes transferred so far
+     * @param contentLength total expected bytes, or -1 if unknown
+     * @param done true when the transfer is complete
+     */
     fun update(bytesRead: Long, contentLength: Long, done: Boolean)
 }

@@ -33,10 +33,17 @@ object NoRetry
 /** Marks this request to skip automatic retries. */
 fun Request.Builder.noRetry(): Request.Builder = tag(NoRetry::class.java, NoRetry)
 
+/**
+ * HTTP client backed by OkHttp + Cronet.
+ * @param context Android context for Cronet provider initialization
+ * @param config network and transport configuration
+ */
 class ApifierClient(context: Context, config: NetworkConfig) {
 
+    /** Configured [OkHttpClient] instance. */
     val client: OkHttpClient = HttpClientBuilder(context, config).build()
 
+    /** Enqueues an async GET. Returns the [Call] for cancellation. */
     fun get(url: String, callback: Callback): Call {
         val request = Request.Builder().url(url).get().build()
         val call = client.newCall(request)
@@ -44,6 +51,7 @@ class ApifierClient(context: Context, config: NetworkConfig) {
         return call
     }
 
+    /** Enqueues an async POST. [contentType] defaults to JSON. Returns the [Call] for cancellation. */
     fun post(url: String, body: String, contentType: String = "application/json", callback: Callback): Call {
         val requestBody = body.toRequestBody(contentType.toMediaTypeOrNull())
         val request = Request.Builder().url(url).post(requestBody).build()
@@ -52,6 +60,7 @@ class ApifierClient(context: Context, config: NetworkConfig) {
         return call
     }
 
+    /** Enqueues an async DELETE. Returns the [Call] for cancellation. */
     fun delete(url: String, callback: Callback): Call {
         val request = Request.Builder().url(url).delete().build()
         val call = client.newCall(request)
@@ -59,6 +68,7 @@ class ApifierClient(context: Context, config: NetworkConfig) {
         return call
     }
 
+    /** Enqueues an async HEAD. Returns the [Call] for cancellation. */
     fun head(url: String, callback: Callback): Call {
         val request = Request.Builder().url(url).head().build()
         val call = client.newCall(request)
@@ -66,6 +76,7 @@ class ApifierClient(context: Context, config: NetworkConfig) {
         return call
     }
 
+    /** GET with progress tracking via [ProgressListener]. */
     fun download(url: String, progressListener: ProgressListener, callback: Callback): Call {
         val request = Request.Builder()
             .url(url)
@@ -77,6 +88,7 @@ class ApifierClient(context: Context, config: NetworkConfig) {
         return call
     }
 
+    /** Multipart file upload. [fileNames] are form-data field names matching [files] by index. */
     fun upload(
         url: String,
         files: List<File>,

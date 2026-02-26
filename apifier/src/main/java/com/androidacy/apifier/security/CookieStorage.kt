@@ -15,8 +15,14 @@
  */
 package com.androidacy.apifier.security
 
+/** Backing store for cookie persistence. Implement via SharedPreferences, EncryptedSharedPreferences, etc. */
 interface CookieStorage {
+    /** Returns the set stored under [key], or [defaultValue] if absent. */
     fun getStringSet(key: String, defaultValue: Set<String>?): Set<String>?
+
+    /** Writes [value] under [key], replacing any existing entry. */
     fun putStringSet(key: String, value: Set<String>)
+
+    /** Deletes the entry for [key]. */
     fun remove(key: String)
 }

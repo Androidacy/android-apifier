@@ -59,6 +59,9 @@ dependencies {
 
     // AndroidX
     implementation("androidx.core:core-ktx:1.17.0")
+
+    // DataStore (optional — only needed if using DataStoreCookieStorage)
+    compileOnly("androidx.datastore:datastore-preferences:1.2.0")
 }
 
 val dokkaJavadocJar by tasks.registering(Jar::class) {
@@ -74,7 +77,7 @@ afterEvaluate {
                 artifact(dokkaJavadocJar)
                 groupId = "com.github.Androidacy"
                 artifactId = "android-apifier"
-                version = "1.2.0"
+                version = "1.3.0"
 
                 pom {
                     name.set("Android Apifier")

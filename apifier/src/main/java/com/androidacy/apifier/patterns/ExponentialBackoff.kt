@@ -18,6 +18,7 @@ package com.androidacy.apifier.patterns
 import kotlin.math.pow
 import kotlin.random.Random
 
+/** Tuning parameters for [ExponentialBackoff]. */
 data class BackoffConfig(
     val maxAttempts: Int = 5,
     val baseDelayMs: Long = 1000L,
@@ -34,8 +35,13 @@ data class BackoffConfig(
     }
 }
 
+/** Computes exponential backoff delays with jitter. */
 class ExponentialBackoff(private val config: BackoffConfig = BackoffConfig()) {
 
+    /**
+     * @param attemptNumber zero-based attempt index
+     * @return delay in millis, or -1 if max attempts exceeded
+     */
     fun calculateDelay(attemptNumber: Int): Long {
         if (attemptNumber >= config.maxAttempts) return -1
         if (attemptNumber < 0) return 0
@@ -50,5 +56,6 @@ class ExponentialBackoff(private val config: BackoffConfig = BackoffConfig()) {
         return delay + jitter
     }
 
+    /** Whether [attemptNumber] hasn't exceeded the configured max. */
     fun shouldRetry(attemptNumber: Int): Boolean = attemptNumber < config.maxAttempts
 }

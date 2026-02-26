@@ -36,26 +36,51 @@ import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
-/**
- * OkHttp interceptor that routes requests through a [CronetEngine], providing
- * QUIC/HTTP3, HTTP/2, and Brotli support. Response bodies are streamed through
- * an Okio [Pipe] so callers can begin reading before the full response arrives.
- */
-class CronetCallInterceptor(
-    private val engine: CronetEngine,
-    private val executor: Executor = Executors.newCachedThreadPool { r ->
-        Thread(r, "Cronet-IO").apply { isDaemon = true }
-    }
+/** OkHttp interceptor that routes requests through a [CronetEngine] for QUIC/HTTP3 support. */
+class CronetCallInterceptor private constructor(
+    private val engineProvider: () -> CronetEngine,
+    private val rebuildCheck: () -> CronetEngine,
+    private val resolver: DohResolver?,
+    private val executor: Executor
 ) : Interceptor {
 
+    internal constructor(
+        engineManager: HttpClientBuilder.ManagedCronetEngine,
+        resolver: DohResolver? = null,
+        executor: Executor = Executors.newCachedThreadPool { r ->
+            Thread(r, "Cronet-IO").apply { isDaemon = true }
+        }
+    ) : this(
+        engineProvider = { engineManager.getEngine() },
+        rebuildCheck = { engineManager.rebuildIfDirty() },
+        resolver = resolver,
+        executor = executor
+    )
+
+    constructor(
+        engine: CronetEngine,
+        executor: Executor = Executors.newCachedThreadPool { r ->
+            Thread(r, "Cronet-IO").apply { isDaemon = true }
+        }
+    ) : this(
+        engineProvider = { engine },
+        rebuildCheck = { engine },
+        resolver = null,
+        executor = executor
+    )
+
     companion object {
-        private const val READ_BUFFER_SIZE = 32 * 1024 // 32KB
-        private const val PIPE_BUFFER_SIZE = 256L * 1024 // 256KB
+        private const val READ_BUFFER_SIZE = 32 * 1024
+        private const val PIPE_BUFFER_SIZE = 256L * 1024
+        private const val MAX_REDIRECTS = 20
         private val ENCODINGS_HANDLED_BY_CRONET = setOf("br", "deflate", "gzip", "x-gzip")
     }
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
+
+        resolver?.resolve(request.url.host)
+        val engine = rebuildCheck()
 
         val headersLatch = CountDownLatch(1)
         var responseInfo: UrlResponseInfo? = null
@@ -63,12 +88,27 @@ class CronetCallInterceptor(
         val pipe = Pipe(PIPE_BUFFER_SIZE)
         val transferBuffer = Buffer()
 
+        var redirectCount = 0
+
         val callback = object : UrlRequest.Callback() {
             override fun onRedirectReceived(
                 req: UrlRequest,
                 info: UrlResponseInfo,
                 newLocationUrl: String
             ) {
+                redirectCount++
+                if (redirectCount > MAX_REDIRECTS) {
+                    req.cancel()
+                    callbackError = IOException("Too many redirects ($MAX_REDIRECTS)")
+                    headersLatch.countDown()
+                    return
+                }
+                if (!newLocationUrl.startsWith("https://", ignoreCase = true)) {
+                    req.cancel()
+                    callbackError = IOException("Redirect to non-HTTPS URL rejected: $newLocationUrl")
+                    headersLatch.countDown()
+                    return
+                }
                 req.followRedirect()
             }
 
@@ -89,7 +129,7 @@ class CronetCallInterceptor(
                     pipe.sink.write(transferBuffer, transferBuffer.size)
                     pipe.sink.flush()
                 } catch (_: Exception) {
-                    return // pipe closed by consumer
+                    return // consumer closed pipe
                 }
                 byteBuffer.clear()
                 req.read(byteBuffer)
