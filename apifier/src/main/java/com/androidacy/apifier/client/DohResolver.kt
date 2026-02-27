@@ -233,14 +233,15 @@ internal class DohResolver(private val config: DohConfig) {
     }
 
     private fun queryProvider(provider: DohProvider, hostname: String): DnsRecord? {
-        // Dual-stack resolution: query both A and AAAA, combine with IPv6 first
-        // (Happy Eyeballs ordering per RFC 8305)
-        val v6Record = try {
-            querySingleType(provider, hostname, DNS_TYPE_AAAA)
-        } catch (e: Exception) {
-            Log.d(TAG, "AAAA query failed for ${provider.name}/$hostname: ${e.message}")
-            null
-        }
+        // Only query AAAA if IPv6 is reachable
+        val v6Record = if (ipv6Available) {
+            try {
+                querySingleType(provider, hostname, DNS_TYPE_AAAA)
+            } catch (e: Exception) {
+                Log.d(TAG, "AAAA query failed for ${provider.name}/$hostname: ${e.message}")
+                null
+            }
+        } else null
 
         val v4Record = try {
             querySingleType(provider, hostname, DNS_TYPE_A)

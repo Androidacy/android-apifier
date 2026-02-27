@@ -77,7 +77,7 @@ afterEvaluate {
                 artifact(dokkaJavadocJar)
                 groupId = "com.github.Androidacy"
                 artifactId = "android-apifier"
-                version = "1.4.2"
+                version = "1.4.3"
 
                 pom {
                     name.set("Android Apifier")
