@@ -39,34 +39,12 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /** OkHttp interceptor that routes requests through a [CronetEngine] for QUIC/HTTP3 support. */
-class CronetCallInterceptor private constructor(
-    private val rebuildCheck: () -> CronetEngine,
-    private val resolver: DohResolver?,
-    private val executor: Executor
+class CronetCallInterceptor(
+    private val engine: CronetEngine,
+    private val executor: Executor = Executors.newCachedThreadPool { r ->
+        Thread(r, "Cronet-IO").apply { isDaemon = true }
+    }
 ) : Interceptor {
-
-    internal constructor(
-        engineManager: HttpClientBuilder.ManagedCronetEngine,
-        resolver: DohResolver? = null,
-        executor: Executor = Executors.newCachedThreadPool { r ->
-            Thread(r, "Cronet-IO").apply { isDaemon = true }
-        }
-    ) : this(
-        rebuildCheck = { engineManager.rebuildIfDirty() },
-        resolver = resolver,
-        executor = executor
-    )
-
-    constructor(
-        engine: CronetEngine,
-        executor: Executor = Executors.newCachedThreadPool { r ->
-            Thread(r, "Cronet-IO").apply { isDaemon = true }
-        }
-    ) : this(
-        rebuildCheck = { engine },
-        resolver = null,
-        executor = executor
-    )
 
     companion object {
         private const val TAG = "CronetCallInterceptor"
@@ -82,9 +60,6 @@ class CronetCallInterceptor private constructor(
         }
 
         val request = chain.request()
-
-        resolver?.resolve(request.url.host)
-        val engine = rebuildCheck()
 
         val headersLatch = CountDownLatch(1)
         var responseInfo: UrlResponseInfo? = null

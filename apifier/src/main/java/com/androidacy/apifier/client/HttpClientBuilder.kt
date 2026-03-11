@@ -49,23 +49,21 @@ class HttpClientBuilder(
     companion object {
         private const val TAG = "HttpClientBuilder"
         private val IDEMPOTENT_METHODS = setOf("GET", "HEAD")
-        private const val SHUTDOWN_MAX_ATTEMPTS = 5
-        private const val SHUTDOWN_RETRY_DELAY_MS = 200L
-        private const val OLD_ENGINE_CLEANUP_DELAY_S = 10L
     }
 
     fun build(): OkHttpClient {
         val dohConfig = config.cronetConfig.dohConfig
         val resolver = if (dohConfig.enabled) DohResolver(dohConfig) else null
 
-        val managedEngine = ManagedCronetEngine(context, config, resolver)
-
-        // Pre-resolve configured domains off the calling thread
-        if (resolver != null && dohConfig.preResolveDomains.isNotEmpty()) {
-            Thread({ resolver.preResolve(dohConfig.preResolveDomains) }, "DoH-PreResolve")
-                .apply { isDaemon = true }
-                .start()
+        // Resolve configured domains via DoH before building the engine so
+        // HostResolverRules are baked in from the start. Parallelized internally.
+        @Suppress("DEPRECATION")
+        val domains = (dohConfig.dohDomains + dohConfig.preResolveDomains).distinct()
+        if (resolver != null && domains.isNotEmpty()) {
+            resolver.preResolve(domains)
         }
+
+        val engine = buildEngine(resolver)
 
         val builder = OkHttpClient.Builder().apply {
             connectTimeout(config.timeouts.connect.inWholeMilliseconds, TimeUnit.MILLISECONDS)
@@ -81,7 +79,7 @@ class HttpClientBuilder(
         val cookieJar = config.cookieStorage?.let { SecureCookieJar(it) }
         builder.addInterceptor(createMainInterceptor(cookieJar))
 
-        builder.addInterceptor(CronetCallInterceptor(managedEngine, resolver))
+        builder.addInterceptor(CronetCallInterceptor(engine))
 
         return builder.build()
     }
@@ -175,146 +173,91 @@ class HttpClientBuilder(
         throw lastException ?: IOException("Request failed")
     }
 
-    internal class ManagedCronetEngine(
-        private val context: Context,
-        private val config: NetworkConfig,
-        private val resolver: DohResolver?
-    ) {
-        @Volatile
-        var currentEngine: CronetEngine = buildEngine()
-            private set
-
-        private val rebuildLock = Any()
-        private val shutdownExecutor = Executors.newSingleThreadScheduledExecutor { r ->
-            Thread(r, "Cronet-Shutdown").apply { isDaemon = true }
+    @Suppress("UnsafeOptInUsageError", "DEPRECATION")
+    private fun buildEngine(resolver: DohResolver?): CronetEngine {
+        val providers = try {
+            Tasks.await(CronetProviderInstaller.installProvider(context))
+            CronetProvider.getAllProviders(context)
+        } catch (e: Exception) {
+            CronetProvider.getAllProviders(context)
         }
 
-        fun rebuildIfDirty(): CronetEngine {
-            if (resolver == null) return currentEngine
-            synchronized(rebuildLock) {
-                if (!resolver.consumeRulesDirty()) return currentEngine
-                val oldEngine = currentEngine
+        val provider = sequenceOf(
+            providers.find { it.isEnabled && it.name == "Google-Play-Services-Cronet-Provider" },
+            providers.find { it.isEnabled && it.name !in setOf("Google-Play-Services-Cronet-Provider", "Java-Cronet-Provider") },
+            providers.find { it.isEnabled && it.name == "Java-Cronet-Provider" },
+            runCatching {
+                val cls = Class.forName("org.chromium.net.impl.JavaCronetProvider")
+                cls.getConstructor(Context::class.java).newInstance(context) as CronetProvider
+            }.getOrNull()
+        ).filterNotNull().firstOrNull() ?: throw IllegalStateException("No Cronet provider available")
 
-                // Try to shut down old engine (releases disk cache lock).
-                // Retry briefly — we're on an IO thread, not main.
-                var shutdownOk = false
-                for (attempt in 0 until SHUTDOWN_MAX_ATTEMPTS) {
-                    try {
-                        oldEngine.shutdown()
-                        shutdownOk = true
-                        break
-                    } catch (e: Exception) {
-                        if (attempt < SHUTDOWN_MAX_ATTEMPTS - 1) Thread.sleep(SHUTDOWN_RETRY_DELAY_MS)
-                    }
-                }
+        val builder = provider.createBuilder().apply {
+            enableBrotli(config.cronetConfig.enableBrotli)
+            enableHttp2(config.cronetConfig.enableHttp2)
+            enableQuic(config.cronetConfig.enableQuic)
 
-                if (shutdownOk) {
-                    currentEngine = buildEngine(useDiskCache = true)
-                } else {
-                    // Active requests prevent shutdown — rebuild with in-memory cache
-                    // to avoid disk lock contention while still applying new DNS rules
-                    Log.w(TAG, "Old engine busy, rebuilding with in-memory cache to avoid DNS leak")
-                    currentEngine = buildEngine(useDiskCache = false)
-                    // Clean up old engine once its requests drain
-                    shutdownExecutor.schedule({
-                        try { oldEngine.shutdown() } catch (_: Exception) {}
-                    }, OLD_ENGINE_CLEANUP_DELAY_S, TimeUnit.SECONDS)
-                }
-                return currentEngine
+            if (config.cronetConfig.enableQuic) {
+                setQuicOptions(
+                    QuicOptions.builder()
+                        .retryWithoutAltSvcOnQuicErrors(true)
+                        .enableTlsZeroRtt(true)
+                        .setInMemoryServerConfigsCacheSize(8192)
+                        .build()
+                )
+                config.cronetConfig.quicHints.forEach { (host, port) -> addQuicHint(host, 443, port) }
             }
+
+            if (config.cronetConfig.enableDnsOverHttps) {
+                setDnsOptions(
+                    DnsOptions.builder()
+                        .preestablishConnectionsToStaleDnsResults(config.cronetConfig.enableStaleDns)
+                        .enableStaleDns(config.cronetConfig.enableStaleDns)
+                        .useBuiltInDnsResolver(true)
+                        .persistHostCache(true)
+                        .build()
+                )
+            }
+
+            config.cronetConfig.cacheDirectory?.let { dir ->
+                if (!dir.exists() && !dir.mkdirs()) {
+                    throw IOException("Failed to create cronet cache directory")
+                }
+                setStoragePath(dir.absolutePath)
+                enableHttpCache(CronetEngine.Builder.HTTP_CACHE_DISK, config.cronetConfig.cacheSizeBytes)
+            }
+
+            enablePublicKeyPinningBypassForLocalTrustAnchors(false)
         }
 
-        @Suppress("UnsafeOptInUsageError", "DEPRECATION")
-        private fun buildEngine(useDiskCache: Boolean = true): CronetEngine {
-            val providers = try {
-                Tasks.await(CronetProviderInstaller.installProvider(context))
-                CronetProvider.getAllProviders(context)
-            } catch (e: Exception) {
-                CronetProvider.getAllProviders(context)
-            }
-
-            val provider = sequenceOf(
-                providers.find { it.isEnabled && it.name == "Google-Play-Services-Cronet-Provider" },
-                providers.find { it.isEnabled && it.name !in setOf("Google-Play-Services-Cronet-Provider", "Java-Cronet-Provider") },
-                providers.find { it.isEnabled && it.name == "Java-Cronet-Provider" },
-                runCatching {
-                    val cls = Class.forName("org.chromium.net.impl.JavaCronetProvider")
-                    cls.getConstructor(Context::class.java).newInstance(context) as CronetProvider
-                }.getOrNull()
-            ).filterNotNull().firstOrNull() ?: throw IllegalStateException("No Cronet provider available")
-
-            val builder = provider.createBuilder().apply {
-                enableBrotli(config.cronetConfig.enableBrotli)
-                enableHttp2(config.cronetConfig.enableHttp2)
-                enableQuic(config.cronetConfig.enableQuic)
-
-                if (config.cronetConfig.enableQuic) {
-                    setQuicOptions(
-                        QuicOptions.builder()
-                            .retryWithoutAltSvcOnQuicErrors(true)
-                            .enableTlsZeroRtt(true)
-                            .setInMemoryServerConfigsCacheSize(8192)
-                            .build()
-                    )
-                    config.cronetConfig.quicHints.forEach { (host, port) -> addQuicHint(host, 443, port) }
-                }
-
-                if (config.cronetConfig.enableDnsOverHttps) {
-                    setDnsOptions(
-                        DnsOptions.builder()
-                            .preestablishConnectionsToStaleDnsResults(config.cronetConfig.enableStaleDns)
-                            .enableStaleDns(config.cronetConfig.enableStaleDns)
-                            .useBuiltInDnsResolver(true)
-                            .persistHostCache(true)
-                            .build()
-                    )
-                }
-
-                if (useDiskCache) {
-                    config.cronetConfig.cacheDirectory?.let { dir ->
-                        if (!dir.exists() && !dir.mkdirs()) {
-                            throw IOException("Failed to create cronet cache directory")
-                        }
-                        setStoragePath(dir.absolutePath)
-                        enableHttpCache(CronetEngine.Builder.HTTP_CACHE_DISK, config.cronetConfig.cacheSizeBytes)
-                    }
-                } else {
-                    enableHttpCache(CronetEngine.Builder.HTTP_CACHE_IN_MEMORY, config.cronetConfig.cacheSizeBytes)
-                }
-
-                enablePublicKeyPinningBypassForLocalTrustAnchors(false)
-            }
-
-            // Apply HostResolverRules via experimental options if DoH resolver has rules
-            val hostRules = resolver?.buildHostResolverRules()
-            if (hostRules != null) {
-                val experimentalJson = JSONObject().apply {
-                    put("HostResolverRules", JSONObject().put("host_resolver_rules", hostRules))
-                    put("AsyncDNS", JSONObject().put("enable", true))
-                }.toString()
-                applyExperimentalOptions(builder, experimentalJson)
-            }
-
-            return builder.build()
+        // Bake pre-resolved HostResolverRules into the engine
+        val hostRules = resolver?.buildHostResolverRules()
+        if (hostRules != null) {
+            val experimentalJson = JSONObject().apply {
+                put("HostResolverRules", JSONObject().put("host_resolver_rules", hostRules))
+                put("AsyncDNS", JSONObject().put("enable", true))
+            }.toString()
+            applyExperimentalOptions(builder, experimentalJson)
         }
 
-        private fun applyExperimentalOptions(builder: CronetEngine.Builder, json: String) {
-            // Try direct cast to ExperimentalCronetEngine.Builder
-            if (builder is ExperimentalCronetEngine.Builder) {
-                builder.setExperimentalOptions(json)
-                return
-            }
+        return builder.build()
+    }
 
-            // Reflection fallback: access mBuilderDelegate which may be ExperimentalCronetEngine.Builder
-            try {
-                val delegateField = builder.javaClass.getDeclaredField("mBuilderDelegate")
-                delegateField.isAccessible = true
-                val delegate = delegateField.get(builder)
-                val setMethod = delegate.javaClass.getMethod("setExperimentalOptions", String::class.java)
-                setMethod.invoke(delegate, json)
-            } catch (e: Exception) {
-                Log.w(TAG, "Could not set experimental options (HostResolverRules): ${e.message}")
-            }
+    private fun applyExperimentalOptions(builder: CronetEngine.Builder, json: String) {
+        if (builder is ExperimentalCronetEngine.Builder) {
+            builder.setExperimentalOptions(json)
+            return
+        }
+
+        // Reflection fallback for provider-wrapped builders
+        try {
+            val delegateField = builder.javaClass.getDeclaredField("mBuilderDelegate")
+            delegateField.isAccessible = true
+            val delegate = delegateField.get(builder)
+            val setMethod = delegate.javaClass.getMethod("setExperimentalOptions", String::class.java)
+            setMethod.invoke(delegate, json)
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not set experimental options (HostResolverRules): ${e.message}")
         }
     }
 }

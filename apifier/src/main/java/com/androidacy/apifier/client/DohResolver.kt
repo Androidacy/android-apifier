@@ -27,7 +27,6 @@ import java.net.URL
 import java.net.URLEncoder
 import java.security.KeyStore
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.HttpsURLConnection
@@ -74,7 +73,6 @@ internal class DohResolver(private val config: DohConfig) {
 
     private val cache = ConcurrentHashMap<String, DnsRecord>()
     private val providerHealth = ConcurrentHashMap<DohProvider, ProviderHealth>()
-    private val rulesDirty = AtomicBoolean(false)
     private val dohSslSocketFactory: SSLSocketFactory = createSystemOnlySslSocketFactory()
     @Volatile private var ipv6Available: Boolean = probeIpv6()
 
@@ -139,12 +137,15 @@ internal class DohResolver(private val config: DohConfig) {
         return rules.ifEmpty { null }
     }
 
-    fun consumeRulesDirty(): Boolean = rulesDirty.getAndSet(false)
-
     fun preResolve(domains: List<String>) {
-        for (domain in domains) {
-            resolve(domain)
+        if (domains.size <= 1) {
+            domains.forEach { resolve(it) }
+            return
         }
+        val threads = domains.map { domain ->
+            Thread({ resolve(domain) }, "DoH-Resolve-$domain").also { it.start() }
+        }
+        threads.forEach { it.join() }
     }
 
     internal fun isIpAddress(host: String): Boolean {
@@ -229,7 +230,6 @@ internal class DohResolver(private val config: DohConfig) {
             oldest?.let { cache.remove(it.key) }
         }
         cache[record.hostname] = record
-        rulesDirty.set(true)
     }
 
     private fun queryProvider(provider: DohProvider, hostname: String): DnsRecord? {

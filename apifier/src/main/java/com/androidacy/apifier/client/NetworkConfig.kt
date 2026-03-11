@@ -49,6 +49,9 @@ data class DohConfig(
     val enabled: Boolean = true,
     val providers: List<DohProvider> = DohProvider.DEFAULT_CHAIN,
     val fallbackToSystemDns: Boolean = true,
+    /** Domains resolved via DoH at build time and baked into Cronet's HostResolverRules. Others use system DNS. */
+    val dohDomains: List<String> = emptyList(),
+    @Deprecated("Use dohDomains instead", replaceWith = ReplaceWith("dohDomains"))
     val preResolveDomains: List<String> = emptyList(),
     val queryTimeoutMs: Int = 3000,
     val maxTtlSeconds: Long = 300,
@@ -208,14 +211,22 @@ class DohConfigBuilder {
     var maxCacheEntries: Int = 100
     var useStaleCache: Boolean = true
     var staleCacheMaxAgeSeconds: Long = 3600
-    private val preResolveDomains = mutableListOf<String>()
+    private val dohDomains = mutableListOf<String>()
 
-    fun preResolve(vararg domains: String) {
-        preResolveDomains.addAll(domains)
+    /** Domains to resolve via DoH and bake into Cronet's HostResolverRules. */
+    fun domains(vararg domains: String) {
+        dohDomains.addAll(domains)
     }
 
+    @Deprecated("Use domains() instead", replaceWith = ReplaceWith("domains(*domains)"))
+    fun preResolve(vararg domains: String) {
+        dohDomains.addAll(domains)
+    }
+
+    @Suppress("DEPRECATION")
     fun build() = DohConfig(
-        enabled, providers, fallbackToSystemDns, preResolveDomains.toList(),
+        enabled, providers, fallbackToSystemDns, dohDomains.toList(),
+        emptyList(),
         queryTimeoutMs, maxTtlSeconds, minTtlSeconds, maxCacheEntries,
         useStaleCache, staleCacheMaxAgeSeconds
     )
