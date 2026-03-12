@@ -61,6 +61,10 @@ class HttpClientBuilder(
         val domains = (dohConfig.dohDomains + dohConfig.preResolveDomains).distinct()
         if (resolver != null && domains.isNotEmpty()) {
             resolver.preResolve(domains)
+            // Happy Eyeballs: race IPv6 vs IPv4 per domain to pick the best
+            // reachable address. HostResolverRules only accept a single IP and
+            // bypass Cronet's own Happy Eyeballs, so we must do our own.
+            resolver.raceResolvedAddresses()
         }
 
         val engine = buildEngine(resolver)

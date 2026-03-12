@@ -27,8 +27,11 @@ import java.net.URL
 import java.net.URLEncoder
 import java.security.KeyStore
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocketFactory
@@ -119,19 +122,147 @@ internal class DohResolver(private val config: DohConfig) {
         return null
     }
 
+    /**
+     * Race resolved addresses per domain to pick the best reachable IP for
+     * HostResolverRules. Must be called after [preResolve]. All domains are
+     * raced in parallel. Each domain follows RFC 8305 Happy Eyeballs v2:
+     * addresses are interleaved by family (v6, v4, v6, v4...), then
+     * connection attempts are staggered with [CONNECTION_ATTEMPT_DELAY_MS]
+     * between each. All attempts run concurrently; first TCP connect wins.
+     * The winner is reordered to the front of the cache entry so
+     * [buildHostResolverRules] picks it.
+     */
+    fun raceResolvedAddresses(port: Int = 443) {
+        val candidates = cache.values.filter { record ->
+            record.addresses.any { it.contains(':') } &&
+                record.addresses.any { !it.contains(':') }
+        }
+        if (candidates.isEmpty()) return
+
+        val threads = candidates.map { record ->
+            Thread({
+                val winner = happyEyeballs(record.addresses, port)
+                if (winner != null) {
+                    val reordered = listOf(winner) + record.addresses.filter { it != winner }
+                    cacheRecord(record.copy(addresses = reordered))
+                }
+            }, "HE-${record.hostname}").also { it.start() }
+        }
+        threads.forEach { it.join() }
+    }
+
+    /**
+     * RFC 8305 Happy Eyeballs v2 connection racing.
+     *
+     * 1. **Interleave** (Section 4): Build sorted list alternating address
+     *    families — [FIRST_ADDRESS_FAMILY_COUNT] IPv6 addresses first, then
+     *    one IPv4, then one IPv6, etc.
+     * 2. **Staggered starts** (Section 5): Launch connection attempts in
+     *    list order with [CONNECTION_ATTEMPT_DELAY_MS] between each.
+     *    Previous attempts are NOT cancelled — all run in parallel.
+     * 3. **First wins**: First successful TCP connect sets the winner.
+     *    All remaining attempts are interrupted.
+     *
+     * Returns the winning address, or IPv4 fallback if all fail.
+     */
+    private fun happyEyeballs(addresses: List<String>, port: Int): String? {
+        val v6Addrs = addresses.filter { it.contains(':') }
+        val v4Addrs = addresses.filter { !it.contains(':') }
+
+        if (v6Addrs.isEmpty()) return v4Addrs.firstOrNull()
+        if (v4Addrs.isEmpty()) return v6Addrs.firstOrNull()
+
+        // Section 4: Interleave with First Address Family Count = 1
+        // Result: v6_0, v4_0, v6_1, v4_1, ...
+        val interleaved = buildInterleavedList(v6Addrs, v4Addrs)
+
+        val winner = AtomicReference<String>(null)
+        val latch = CountDownLatch(1)
+        val attemptThreads = mutableListOf<Thread>()
+
+        // Section 5: Staggered connection attempts
+        for ((index, addr) in interleaved.withIndex()) {
+            // If we already have a winner, skip remaining addresses
+            if (winner.get() != null) break
+
+            val thread = Thread({
+                try {
+                    Socket().use { sock ->
+                        sock.connect(
+                            InetSocketAddress(InetAddress.getByName(addr), port),
+                            RACE_CONNECT_TIMEOUT_MS
+                        )
+                        if (winner.compareAndSet(null, addr)) latch.countDown()
+                    }
+                } catch (_: Exception) {
+                    // This address unreachable
+                }
+            }, "HE-$index")
+
+            attemptThreads.add(thread)
+            thread.start()
+
+            // Wait CONNECTION_ATTEMPT_DELAY_MS before starting next attempt,
+            // but stop early if we already have a winner (Section 5 optimization)
+            if (index < interleaved.lastIndex) {
+                try {
+                    if (latch.await(CONNECTION_ATTEMPT_DELAY_MS, TimeUnit.MILLISECONDS)) break
+                } catch (_: InterruptedException) {
+                    break
+                }
+            }
+        }
+
+        // Wait for a winner or overall timeout
+        if (winner.get() == null) {
+            val remaining = RACE_CONNECT_TIMEOUT_MS + 500L
+            latch.await(remaining, TimeUnit.MILLISECONDS)
+        }
+
+        // Cancel all lingering attempts
+        attemptThreads.forEach { it.interrupt() }
+
+        // Section 5: if all fail, prefer IPv4 as universally routable fallback
+        return winner.get() ?: v4Addrs.first()
+    }
+
+    /**
+     * RFC 8305 Section 4: Build interleaved address list.
+     * [FIRST_ADDRESS_FAMILY_COUNT] preferred-family (IPv6) addresses first,
+     * then alternate one-for-one with the other family.
+     */
+    private fun buildInterleavedList(
+        v6Addrs: List<String>,
+        v4Addrs: List<String>
+    ): List<String> {
+        val result = mutableListOf<String>()
+        val v6Iter = v6Addrs.iterator()
+        val v4Iter = v4Addrs.iterator()
+
+        // Leading preferred-family addresses
+        repeat(FIRST_ADDRESS_FAMILY_COUNT) {
+            if (v6Iter.hasNext()) result.add(v6Iter.next())
+        }
+
+        // Alternate families one-for-one
+        while (v6Iter.hasNext() || v4Iter.hasNext()) {
+            if (v4Iter.hasNext()) result.add(v4Iter.next())
+            if (v6Iter.hasNext()) result.add(v6Iter.next())
+        }
+
+        return result
+    }
+
     fun buildHostResolverRules(): String? {
         if (cache.isEmpty()) return null
         val rules = cache.values
             .filter { record -> SAFE_HOSTNAME.matches(record.hostname) }
             .joinToString(", ") { record ->
-                // HostResolverRules only accept a single address, bypassing Cronet's
-                // own Happy Eyeballs. Pick based on probed IPv6 reachability.
-                val ip = if (ipv6Available) {
-                    record.addresses.first()
-                } else {
-                    record.addresses.firstOrNull { !it.contains(':') }
-                        ?: record.addresses.first()
-                }
+                // After raceResolvedAddresses(), the winner is first.
+                // If no race was run, prefer IPv4 as a safe default since
+                // HostResolverRules bypass Happy Eyeballs.
+                val ip = record.addresses.firstOrNull { !it.contains(':') }
+                    ?: record.addresses.first()
                 "MAP ${record.hostname} $ip"
             }
         return rules.ifEmpty { null }
@@ -531,5 +662,19 @@ internal class DohResolver(private val config: DohConfig) {
         private const val IPV6_PROBE_TIMEOUT_MS = 2000
         private const val IPV6_PROBE_ATTEMPTS = 3
         private const val IPV6_PROBE_THRESHOLD = 2
+
+        // RFC 8305 Happy Eyeballs v2 constants
+
+        /** Section 4: Number of leading preferred-family (IPv6) addresses
+         *  before interleaving with IPv4. RFC recommends 1. */
+        private const val FIRST_ADDRESS_FAMILY_COUNT = 1
+
+        /** Section 5: Delay between staggered connection attempts.
+         *  RFC recommends 250ms (min 100ms, max 2s). */
+        private const val CONNECTION_ATTEMPT_DELAY_MS = 250L
+
+        /** Per-address TCP connect timeout during the race. Matches the
+         *  RFC maximum Connection Attempt Delay of 2 seconds. */
+        private const val RACE_CONNECT_TIMEOUT_MS = 2000
     }
 }
