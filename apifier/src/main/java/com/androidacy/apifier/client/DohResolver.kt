@@ -180,30 +180,37 @@ internal class DohResolver(private val config: DohConfig) {
         val latch = CountDownLatch(1)
         val attemptThreads = mutableListOf<Thread>()
 
+        // Keep socket refs so we can close them directly (Thread.interrupt
+        // may not unblock Socket.connect on all Android implementations).
+        val openSockets = ConcurrentHashMap<Int, Socket>()
+
         // Section 5: Staggered connection attempts
         for ((index, addr) in interleaved.withIndex()) {
-            // If we already have a winner, skip remaining addresses
             if (winner.get() != null) break
 
+            val idx = index
             val thread = Thread({
+                val sock = Socket()
+                openSockets[idx] = sock
                 try {
-                    Socket().use { sock ->
-                        sock.connect(
-                            InetSocketAddress(InetAddress.getByName(addr), port),
-                            RACE_CONNECT_TIMEOUT_MS
-                        )
-                        if (winner.compareAndSet(null, addr)) latch.countDown()
-                    }
+                    sock.connect(
+                        InetSocketAddress(InetAddress.getByName(addr), port),
+                        RACE_CONNECT_TIMEOUT_MS
+                    )
+                    if (winner.compareAndSet(null, addr)) latch.countDown()
                 } catch (_: Exception) {
                     // This address unreachable
+                } finally {
+                    try { sock.close() } catch (_: Exception) {}
+                    openSockets.remove(idx)
                 }
-            }, "HE-$index")
+            }, "HE-${addr.take(15)}-$idx")
 
             attemptThreads.add(thread)
             thread.start()
 
-            // Wait CONNECTION_ATTEMPT_DELAY_MS before starting next attempt,
-            // but stop early if we already have a winner (Section 5 optimization)
+            // Wait CONNECTION_ATTEMPT_DELAY_MS before next attempt,
+            // stop early if we already have a winner (Section 5)
             if (index < interleaved.lastIndex) {
                 try {
                     if (latch.await(CONNECTION_ATTEMPT_DELAY_MS, TimeUnit.MILLISECONDS)) break
@@ -219,7 +226,8 @@ internal class DohResolver(private val config: DohConfig) {
             latch.await(remaining, TimeUnit.MILLISECONDS)
         }
 
-        // Cancel all lingering attempts
+        // Force-close lingering sockets and interrupt threads
+        openSockets.values.forEach { try { it.close() } catch (_: Exception) {} }
         attemptThreads.forEach { it.interrupt() }
 
         // Section 5: if all fail, prefer IPv4 as universally routable fallback
@@ -258,11 +266,10 @@ internal class DohResolver(private val config: DohConfig) {
         val rules = cache.values
             .filter { record -> SAFE_HOSTNAME.matches(record.hostname) }
             .joinToString(", ") { record ->
-                // After raceResolvedAddresses(), the winner is first.
-                // If no race was run, prefer IPv4 as a safe default since
-                // HostResolverRules bypass Happy Eyeballs.
-                val ip = record.addresses.firstOrNull { !it.contains(':') }
-                    ?: record.addresses.first()
+                // After raceResolvedAddresses(), the race winner is
+                // reordered to front. For unraced records (single family),
+                // .first() returns the only available address.
+                val ip = record.addresses.first()
                 "MAP ${record.hostname} $ip"
             }
         return rules.ifEmpty { null }
