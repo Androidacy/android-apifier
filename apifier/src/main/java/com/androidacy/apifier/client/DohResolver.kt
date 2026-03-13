@@ -270,7 +270,11 @@ internal class DohResolver(private val config: DohConfig) {
                 // reordered to front. For unraced records (single family),
                 // .first() returns the only available address.
                 val ip = record.addresses.first()
-                "MAP ${record.hostname} $ip"
+                // Chromium's HostResolverRules parser (ParseHostAndPort)
+                // requires bracketed IPv6 — unbracketed addresses are
+                // misparsed (last colon treated as host:port separator).
+                val host = if (':' in ip) "[$ip]" else ip
+                "MAP ${record.hostname} $host"
             }
         return rules.ifEmpty { null }
     }
