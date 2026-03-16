@@ -642,22 +642,41 @@ internal class DohResolver(private val config: DohConfig) {
         throw Exception("DNS name extends beyond packet")
     }
 
+    /** Quick local check: does any network interface have a global IPv6 address? */
+    private fun hasIpv6Interface(): Boolean {
+        return try {
+            java.net.NetworkInterface.getNetworkInterfaces()?.asSequence()
+                ?.flatMap { it.inetAddresses.asSequence() }
+                ?.any { it is java.net.Inet6Address && !it.isLinkLocalAddress && !it.isLoopbackAddress }
+                ?: false
+        } catch (_: Exception) { false }
+    }
+
     /** TCP connect to a known-good IPv6 address. Fails if IPv6 is blocked upstream. */
     private fun probeIpv6(): Boolean {
+        if (!hasIpv6Interface()) {
+            Log.d(TAG, "IPv6 probe: skipped, no global IPv6 interface")
+            return false
+        }
+
         val target = InetSocketAddress(
             InetAddress.getByName(IPV6_PROBE_ADDRESS), IPV6_PROBE_PORT
         )
-        var successes = 0
-        for (i in 0 until IPV6_PROBE_ATTEMPTS) {
-            try {
-                Socket().use { sock ->
-                    sock.connect(target, IPV6_PROBE_TIMEOUT_MS)
-                    successes++
-                }
-            } catch (_: Exception) { /* TCP handshake failed — IPv6 unreachable */ }
+        val successes = AtomicInteger(0)
+        val threads = (0 until IPV6_PROBE_ATTEMPTS).map { i ->
+            Thread({
+                try {
+                    Socket().use { sock ->
+                        sock.connect(target, IPV6_PROBE_TIMEOUT_MS)
+                        successes.incrementAndGet()
+                    }
+                } catch (_: Exception) { /* TCP handshake failed — IPv6 unreachable */ }
+            }, "IPv6-Probe-$i").also { it.start() }
         }
-        val available = successes >= IPV6_PROBE_THRESHOLD
-        Log.d(TAG, "IPv6 probe: $successes/$IPV6_PROBE_ATTEMPTS succeeded, available=$available")
+        threads.forEach { it.join() }
+
+        val available = successes.get() >= IPV6_PROBE_THRESHOLD
+        Log.d(TAG, "IPv6 probe: ${successes.get()}/$IPV6_PROBE_ATTEMPTS succeeded, available=$available")
         return available
     }
 

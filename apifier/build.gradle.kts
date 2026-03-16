@@ -46,7 +46,7 @@ android {
 
 dependencies {
     // OkHttp
-    api("com.squareup.okhttp3:okhttp:5.3.0")
+    api("com.squareup.okhttp3:okhttp:5.3.2")
 
     // Cronet
     api("com.google.android.gms:play-services-cronet:18.1.1")
@@ -58,10 +58,10 @@ dependencies {
     api("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 
     // AndroidX
-    implementation("androidx.core:core-ktx:1.17.0")
+    implementation("androidx.core:core-ktx:1.18.0")
 
     // DataStore (optional — only needed if using DataStoreCookieStorage)
-    compileOnly("androidx.datastore:datastore-preferences:1.2.0")
+    compileOnly("androidx.datastore:datastore-preferences:1.2.1")
 }
 
 val dokkaJavadocJar by tasks.registering(Jar::class) {
@@ -77,7 +77,7 @@ afterEvaluate {
                 artifact(dokkaJavadocJar)
                 groupId = "com.github.Androidacy"
                 artifactId = "android-apifier"
-                version = "1.5.3"
+                version = "1.6.0"
 
                 pom {
                     name.set("Android Apifier")
