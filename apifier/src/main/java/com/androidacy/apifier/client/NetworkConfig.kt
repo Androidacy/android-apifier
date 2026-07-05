@@ -76,7 +76,7 @@ data class CronetConfig(
     val enableQuic: Boolean = true,
     val enableHttp2: Boolean = true,
     val enableBrotli: Boolean = true,
-    val quicHints: List<Pair<String, Int>> = emptyList(),
+    val quicHints: List<Triple<String, Int, Int>> = emptyList(),
     val cacheDirectory: File? = null,
     val cacheSizeBytes: Long = 256 * 1024 * 1024, // 256MB default
     val enableDnsOverHttps: Boolean = true,
@@ -85,9 +85,10 @@ data class CronetConfig(
 ) {
     init {
         require(cacheSizeBytes > 0) { "cacheSizeBytes must be positive" }
-        quicHints.forEach { (host, port) ->
+        quicHints.forEach { (host, port, alternatePort) ->
             require(host.isNotBlank()) { "QUIC hint host cannot be blank" }
             require(port in 1..65535) { "QUIC hint port must be between 1 and 65535" }
+            require(alternatePort in 1..65535) { "QUIC hint alternatePort must be between 1 and 65535" }
         }
     }
 }
@@ -178,7 +179,7 @@ class CronetConfigBuilder {
     var enableQuic = true
     var enableHttp2 = true
     var enableBrotli = true
-    var quicHints = mutableListOf<Pair<String, Int>>()
+    var quicHints = mutableListOf<Triple<String, Int, Int>>()
     var cacheDirectory: File? = null
     var cacheSizeBytes: Long = 256 * 1024 * 1024
     var enableDnsOverHttps = true
@@ -186,7 +187,7 @@ class CronetConfigBuilder {
     private var dohConfig = DohConfig()
 
     fun quicHint(host: String, port: Int = 443, alternatePort: Int = 443) {
-        quicHints.add(host to alternatePort)
+        quicHints.add(Triple(host, port, alternatePort))
     }
 
     fun doh(block: DohConfigBuilder.() -> Unit) {

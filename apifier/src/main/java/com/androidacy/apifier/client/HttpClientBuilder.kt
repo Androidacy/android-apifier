@@ -209,7 +209,7 @@ class HttpClientBuilder(
                         .setInMemoryServerConfigsCacheSize(8192)
                         .build()
                 )
-                config.cronetConfig.quicHints.forEach { (host, port) -> addQuicHint(host, 443, port) }
+                config.cronetConfig.quicHints.forEach { (host, port, alternatePort) -> addQuicHint(host, port, alternatePort) }
             }
 
             if (config.cronetConfig.enableDnsOverHttps) {
