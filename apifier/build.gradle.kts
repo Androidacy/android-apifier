@@ -46,7 +46,7 @@ android {
 
 dependencies {
     // OkHttp
-    api("com.squareup.okhttp3:okhttp:5.3.2")
+    api("com.squareup.okhttp3:okhttp:5.4.0")
 
     // Cronet
     api("com.google.android.gms:play-services-cronet:18.1.1")
@@ -54,11 +54,11 @@ dependencies {
     implementation("org.chromium.net:cronet-embedded:143.7445.0")
 
     // Kotlin coroutines
-    api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
-    api("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+    api("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
     // AndroidX
-    implementation("androidx.core:core-ktx:1.18.0")
+    implementation("androidx.core:core-ktx:1.19.0")
 
     // DataStore (optional — only needed if using DataStoreCookieStorage)
     compileOnly("androidx.datastore:datastore-preferences:1.2.1")
