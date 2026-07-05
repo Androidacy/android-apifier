@@ -62,6 +62,9 @@ dependencies {
 
     // DataStore (optional — only needed if using DataStoreCookieStorage)
     compileOnly("androidx.datastore:datastore-preferences:1.2.1")
+
+    // Tests
+    testImplementation("junit:junit:4.13.2")
 }
 
 val dokkaJavadocJar by tasks.registering(Jar::class) {
