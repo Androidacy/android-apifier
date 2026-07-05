@@ -48,7 +48,11 @@ class CircuitBreaker(
     fun recordFailure() {
         lastFailureTime = System.currentTimeMillis()
         failureCount++
-        if (failureCount >= failureThreshold && state == STATE_CLOSED) {
+        // A failed probe in half-open must re-open immediately; otherwise the
+        // breaker would linger half-open and keep admitting all traffic.
+        if (state == STATE_HALF_OPEN ||
+            (state == STATE_CLOSED && failureCount >= failureThreshold)
+        ) {
             state = STATE_OPEN
         }
     }
