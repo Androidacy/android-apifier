@@ -53,7 +53,7 @@ class ExponentialBackoff(private val config: BackoffConfig = BackoffConfig()) {
 
         val jitter = (delay * config.jitterFactor * Random.nextDouble()).toLong()
 
-        return delay + jitter
+        return (delay + jitter).coerceAtMost(config.maxDelayMs)
     }
 
     /** Whether [attemptNumber] hasn't exceeded the configured max. */
