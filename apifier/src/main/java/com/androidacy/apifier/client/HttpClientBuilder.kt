@@ -105,8 +105,8 @@ class HttpClientBuilder(
 
     private fun createConnectionPool() = ConnectionPool(
         config.connectionPool.maxIdleConnections,
-        config.connectionPool.keepAliveDuration.inWholeMinutes,
-        TimeUnit.MINUTES
+        config.connectionPool.keepAliveDuration.inWholeMilliseconds,
+        TimeUnit.MILLISECONDS
     )
 
     private fun createMainInterceptor(cookieJar: SecureCookieJar?) = okhttp3.Interceptor { chain ->
@@ -145,7 +145,7 @@ class HttpClientBuilder(
                 }
 
                 cookieJar?.let { jar ->
-                    (resp.headers("Set-Cookie") + resp.headers("set-cookie") + resp.headers("set-cookie2"))
+                    resp.headers("Set-Cookie")
                         .mapNotNull { Cookie.parse(req.url, it) }
                         .takeIf { it.isNotEmpty() }
                         ?.let { jar.saveFromResponse(req.url, it) }

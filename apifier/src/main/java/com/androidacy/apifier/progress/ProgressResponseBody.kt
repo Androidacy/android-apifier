@@ -23,6 +23,7 @@ import okio.ForwardingSource
 import okio.Source
 import okio.buffer
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /** [ResponseBody] wrapper that reports download progress to a [ProgressListener]. */
@@ -34,6 +35,7 @@ class ProgressResponseBody(
     private var bufferedSource: BufferedSource? = null
     private val totalBytesRead = AtomicLong(0L)
     private val lastReportedBytes = AtomicLong(-1L)
+    private val doneReported = AtomicBoolean(false)
 
     override fun contentType(): MediaType? = responseBody.contentType()
 
@@ -57,13 +59,17 @@ class ProgressResponseBody(
                     totalBytesRead.get()
                 }
 
-                val last = lastReportedBytes.get()
-                if (current != last && lastReportedBytes.compareAndSet(last, current)) {
-                    progressListener.update(
-                        current,
-                        responseBody.contentLength(),
-                        bytesRead == -1L
-                    )
+                if (bytesRead == -1L) {
+                    // EOF may land on a byte total already reported by the previous
+                    // read, so the dedup guard below would swallow the done signal.
+                    if (!doneReported.getAndSet(true)) {
+                        progressListener.update(current, responseBody.contentLength(), true)
+                    }
+                } else {
+                    val last = lastReportedBytes.get()
+                    if (current != last && lastReportedBytes.compareAndSet(last, current)) {
+                        progressListener.update(current, responseBody.contentLength(), false)
+                    }
                 }
                 return bytesRead
             }
