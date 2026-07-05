@@ -70,12 +70,7 @@ class HttpClientBuilder(
 
     fun build(): OkHttpClient {
         if (Looper.getMainLooper().isCurrentThread) {
-            Log.w(
-                TAG,
-                "ApifierClient constructed on the main thread — DoH resolution and provider " +
-                    "installation do blocking network I/O and will be skipped, degrading to system " +
-                    "DNS. Construct on a background thread; check dohActive to confirm DoH is live."
-            )
+            Log.d(TAG, "Constructed on the main thread; DoH/provider I/O may be skipped")
         }
 
         val dohConfig = config.cronetConfig.dohConfig
@@ -94,6 +89,13 @@ class HttpClientBuilder(
         }
 
         val engine = buildEngine(resolver)
+
+        // Warn whenever DoH was expected to produce host rules but did not — for any
+        // reason (network down, all providers failed, main-thread I/O skipped). The
+        // client still works via system DNS, but callers relying on DoH should know.
+        if (resolver != null && domains.isNotEmpty() && !dohActive) {
+            Log.w(TAG, "DoH resolution produced no host rules; falling back to system DNS")
+        }
 
         val builder = OkHttpClient.Builder().apply {
             connectTimeout(config.timeouts.connect.inWholeMilliseconds, TimeUnit.MILLISECONDS)
