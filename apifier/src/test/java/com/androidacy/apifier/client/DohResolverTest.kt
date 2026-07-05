@@ -15,6 +15,7 @@
  */
 package com.androidacy.apifier.client
 
+import android.util.Log
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -25,6 +26,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.shadows.ShadowLog
 import java.net.URL
 import java.util.UUID
 import javax.net.ssl.HttpsURLConnection
@@ -152,6 +154,41 @@ class DohResolverTest {
             resolver.parseDnsWireResponse("cloudflare.com", tooShort, 1)
         }
         assertEquals("INVALID_RESPONSE", failureNameOf(shortEx))
+    }
+
+    @Test
+    fun nxdomainLogsNoDomainReason() {
+        ShadowLog.clear()
+
+        // Live successful resolution first: proves providers are reachable, and
+        // must not itself trigger the give-up WARN (cache-hit / success path).
+        val liveAddresses = resolver.resolve("cloudflare.com")
+        assertNotNull("expected a live resolution for cloudflare.com", liveAddresses)
+        assertTrue(liveAddresses!!.isNotEmpty())
+        assertTrue(
+            "a successful resolution must not log the DoH give-up WARN",
+            ShadowLog.getLogs().none { it.type == Log.WARN && it.tag == "DohResolver" }
+        )
+
+        // isIpAddress early return must not log the WARN either.
+        ShadowLog.clear()
+        assertNull(resolver.resolve("192.0.2.1"))
+        assertTrue(
+            "the isIpAddress early return must not log the DoH give-up WARN",
+            ShadowLog.getLogs().none { it.type == Log.WARN && it.tag == "DohResolver" }
+        )
+
+        ShadowLog.clear()
+        val randomLabel = UUID.randomUUID().toString().replace("-", "")
+        val hostname = "nx-$randomLabel.cloudflare.com"
+
+        assertNull(resolver.resolve(hostname))
+
+        val warnLog = ShadowLog.getLogs().firstOrNull {
+            it.type == Log.WARN && it.tag == "DohResolver" &&
+                it.msg?.contains(hostname) == true && it.msg?.contains("NO_DOMAIN") == true
+        }
+        assertNotNull("expected a WARN log with NO_DOMAIN for $hostname", warnLog)
     }
 
     @Test

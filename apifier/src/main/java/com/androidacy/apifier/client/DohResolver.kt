@@ -83,6 +83,12 @@ internal class DohResolver(private val config: DohConfig) {
         return if (a.ordinal <= b.ordinal) a else b
     }
 
+    /** Outcome of querying one provider: resolved addresses, or a categorized failure. */
+    private sealed interface ProviderOutcome {
+        data class Resolved(val record: DnsRecord) : ProviderOutcome
+        data class Failed(val failure: DohFailure) : ProviderOutcome
+    }
+
     private class ProviderHealth {
         private val consecutiveFailures = AtomicInteger(0)
         private val backoffUntilMillis = AtomicLong(0)
@@ -118,26 +124,33 @@ internal class DohResolver(private val config: DohConfig) {
         }
 
         // Try providers
+        var aggregateFailure: DohFailure? = null
         for (provider in config.providers) {
             val health = providerHealth.getOrPut(provider) { ProviderHealth() }
             if (!health.isAvailable()) continue
 
-            val record = try {
+            val outcome = try {
                 queryProvider(provider, hostname)
             } catch (e: Exception) {
                 Log.d(TAG, "Provider ${provider.name} failed for $hostname: ${e.message}")
-                null
+                ProviderOutcome.Failed(classifyThrowable(e))
             }
 
-            if (record != null && record.addresses.isNotEmpty()) {
-                health.recordSuccess()
-                cacheRecord(record)
-                return record.addresses
+            when (outcome) {
+                is ProviderOutcome.Resolved -> {
+                    health.recordSuccess()
+                    cacheRecord(outcome.record)
+                    return outcome.record.addresses
+                }
+                is ProviderOutcome.Failed -> {
+                    // queryProvider() catches its own failures and returns a
+                    // Failed outcome rather than throwing, so this is the one
+                    // place that actually observes a provider miss — record it
+                    // here, not just in the catch above.
+                    aggregateFailure = moreSignificant(aggregateFailure, outcome.failure)
+                    health.recordFailure()
+                }
             }
-            // queryProvider() catches its own failures and returns null rather
-            // than throwing, so this is the one place that actually observes
-            // a provider miss — record it here, not just in the catch above.
-            health.recordFailure()
         }
 
         // Stale cache fallback
@@ -148,6 +161,13 @@ internal class DohResolver(private val config: DohConfig) {
                     return record.addresses
                 }
             }
+        }
+
+        // Only reached when providers were actually tried and none resolved —
+        // never on the isIpAddress early return above, and never when a
+        // cache/stale hit already returned.
+        if (aggregateFailure != null) {
+            Log.w(TAG, "DoH could not resolve $hostname via any provider: $aggregateFailure")
         }
 
         return null
@@ -407,13 +427,16 @@ internal class DohResolver(private val config: DohConfig) {
         cache[record.hostname] = record
     }
 
-    private fun queryProvider(provider: DohProvider, hostname: String): DnsRecord? {
+    private fun queryProvider(provider: DohProvider, hostname: String): ProviderOutcome {
+        var aggregateFailure: DohFailure? = null
+
         // Only query AAAA if IPv6 is reachable
         val v6Record = if (ipv6Available) {
             try {
                 querySingleType(provider, hostname, DNS_TYPE_AAAA)
             } catch (e: Exception) {
                 Log.d(TAG, "AAAA query failed for ${provider.name}/$hostname: ${e.message}")
+                aggregateFailure = moreSignificant(aggregateFailure, classifyThrowable(e))
                 null
             }
         } else null
@@ -422,6 +445,7 @@ internal class DohResolver(private val config: DohConfig) {
             querySingleType(provider, hostname, DNS_TYPE_A)
         } catch (e: Exception) {
             Log.d(TAG, "A query failed for ${provider.name}/$hostname: ${e.message}")
+            aggregateFailure = moreSignificant(aggregateFailure, classifyThrowable(e))
             null
         }
 
@@ -437,13 +461,17 @@ internal class DohResolver(private val config: DohConfig) {
             minTtl = minOf(minTtl, it.ttlSeconds)
         }
 
-        if (allAddresses.isEmpty()) return null
+        if (allAddresses.isEmpty()) {
+            return ProviderOutcome.Failed(aggregateFailure ?: DohFailure.NETWORK_ERROR)
+        }
 
-        return DnsRecord(
-            hostname = hostname,
-            addresses = allAddresses,
-            ttlSeconds = if (minTtl == Long.MAX_VALUE) config.minTtlSeconds else minTtl,
-            resolvedAtMillis = System.currentTimeMillis()
+        return ProviderOutcome.Resolved(
+            DnsRecord(
+                hostname = hostname,
+                addresses = allAddresses,
+                ttlSeconds = if (minTtl == Long.MAX_VALUE) config.minTtlSeconds else minTtl,
+                resolvedAtMillis = System.currentTimeMillis()
+            )
         )
     }
 
