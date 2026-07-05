@@ -75,6 +75,14 @@ class DohResolverTest {
 
     @Test
     fun resolvesNxdomainToNull() {
+        // Prove providers are actually reachable first, so the null asserted below means
+        // NXDOMAIN and not "every provider was unreachable" — resolve() can't tell those
+        // apart on its own, and a no-egress runner would otherwise pass this test for the
+        // wrong reason.
+        val liveAddresses = resolver.resolve("cloudflare.com")
+        assertNotNull("expected a live resolution for cloudflare.com", liveAddresses)
+        assertTrue(liveAddresses!!.isNotEmpty())
+
         val randomLabel = UUID.randomUUID().toString().replace("-", "")
         val hostname = "nx-$randomLabel.cloudflare.com"
 

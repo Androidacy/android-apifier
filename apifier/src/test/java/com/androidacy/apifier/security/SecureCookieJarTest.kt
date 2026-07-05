@@ -143,10 +143,45 @@ class SecureCookieJarTest {
 
     @Test
     fun corruptStoredValueDroppedFailClosed() {
-        storage.putStringSet("cookies_example.com", setOf("!!!not-valid-ciphertext!!!"))
-        storage.putStringSet("_cookie_domains", setOf("example.com"))
+        storage.putStringSet(
+            "_cookie_domains",
+            setOf("bad-base64.example.com", "v1-bad-tag.example.com", "legacy-bad-tag.example.com"),
+        )
 
-        assertTrue(jar.loadForRequest(url("https://example.com/")).isEmpty())
+        // Not valid Base64 at all: rejected by decrypt()'s outer catch around
+        // Base64.decode, before gcmDecrypt is ever reached.
+        storage.putStringSet("cookies_bad-base64.example.com", setOf("!!!not-valid-ciphertext!!!"))
+
+        // Valid Base64, current framing ([version=1][ivLen][iv][ciphertext]) filled with
+        // random bytes. Size 2 + 12 + 32 = 46 clears the "raw.size >= 2 + ivLen +
+        // GCM_TAG_LENGTH / 8" guard (2 + 12 + 16 = 30), so decrypt() actually calls
+        // gcmDecrypt and this is rejected on AEAD tag verification, not short-circuited
+        // by the length check. Cleartext or an attacker's substitute cannot forge a
+        // valid tag under our Keystore key, which is exactly the guarantee this test
+        // exists to prove.
+        val random = java.security.SecureRandom()
+        val v1 = ByteArray(2 + 12 + 32).also(random::nextBytes)
+        v1[0] = 1
+        v1[1] = 12
+        storage.putStringSet(
+            "cookies_v1-bad-tag.example.com",
+            setOf(Base64.encodeToString(v1, Base64.NO_WRAP)),
+        )
+
+        // Valid Base64, legacy framing ([ivLen][iv][ciphertext], first byte != version 1)
+        // filled with random bytes. Size 1 + 12 + 32 = 45 clears the legacy guard
+        // (1 + 12 + 16 = 29), so gcmDecrypt runs on this path too and rejects it on the
+        // tag, exercising the legacy-format fail-closed branch separately.
+        val legacy = ByteArray(1 + 12 + 32).also(random::nextBytes)
+        legacy[0] = 12
+        storage.putStringSet(
+            "cookies_legacy-bad-tag.example.com",
+            setOf(Base64.encodeToString(legacy, Base64.NO_WRAP)),
+        )
+
+        assertTrue(jar.loadForRequest(url("https://bad-base64.example.com/")).isEmpty())
+        assertTrue(jar.loadForRequest(url("https://v1-bad-tag.example.com/")).isEmpty())
+        assertTrue(jar.loadForRequest(url("https://legacy-bad-tag.example.com/")).isEmpty())
     }
 
     @Test
