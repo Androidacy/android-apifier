@@ -27,6 +27,7 @@ data class NetworkConfig(
     val timeouts: TimeoutConfig = TimeoutConfig(),
     val connectionPool: ConnectionPoolConfig = ConnectionPoolConfig(),
     val retryConfig: RetryConfig = RetryConfig(),
+    val circuitBreakerConfig: CircuitBreakerConfig = CircuitBreakerConfig(),
     val cookieStorage: CookieStorage? = null,
     val headers: Map<String, String> = emptyMap(),
     val dynamicHeaders: Map<String, () -> String> = emptyMap()
@@ -119,6 +120,23 @@ data class ConnectionPoolConfig(
     }
 }
 
+/**
+ * Per-host circuit breaker. After [failureThreshold] consecutive failed calls to a host,
+ * further calls short-circuit with an IOException until [resetTimeoutMs] elapses, then one
+ * probe is admitted. A 5xx response or transport failure counts as a failure; any other
+ * response counts as a success.
+ */
+data class CircuitBreakerConfig(
+    val enabled: Boolean = true,
+    val failureThreshold: Int = 5,
+    val resetTimeoutMs: Long = 30_000L
+) {
+    init {
+        require(failureThreshold > 0) { "failureThreshold must be positive" }
+        require(resetTimeoutMs > 0) { "resetTimeoutMs must be positive" }
+    }
+}
+
 /** Retry policy for failed requests. */
 data class RetryConfig(
     val maxAttempts: Int = 1,
@@ -136,6 +154,7 @@ class NetworkConfigBuilder {
     private var timeouts = TimeoutConfig()
     private var connectionPool = ConnectionPoolConfig()
     private var retryConfig = RetryConfig()
+    private var circuitBreakerConfig = CircuitBreakerConfig()
     private var cookieStorage: CookieStorage? = null
     private val headers = mutableMapOf<String, String>()
     private val dynamicHeaders = mutableMapOf<String, () -> String>()
@@ -156,6 +175,10 @@ class NetworkConfigBuilder {
         retryConfig = RetryConfigBuilder().apply(block).build()
     }
 
+    fun circuitBreaker(block: CircuitBreakerConfigBuilder.() -> Unit) {
+        circuitBreakerConfig = CircuitBreakerConfigBuilder().apply(block).build()
+    }
+
     fun cookieStorage(storage: CookieStorage) {
         cookieStorage = storage
     }
@@ -169,7 +192,7 @@ class NetworkConfigBuilder {
     }
 
     fun build() = NetworkConfig(
-        cronetConfig, timeouts, connectionPool, retryConfig,
+        cronetConfig, timeouts, connectionPool, retryConfig, circuitBreakerConfig,
         cookieStorage, headers, dynamicHeaders
     )
 }
@@ -258,4 +281,13 @@ class RetryConfigBuilder {
     var retryIdempotentOnly: Boolean = true
 
     fun build() = RetryConfig(maxAttempts, retryOn5xx, retryIdempotentOnly)
+}
+
+/** DSL builder for [CircuitBreakerConfig]. */
+class CircuitBreakerConfigBuilder {
+    var enabled: Boolean = true
+    var failureThreshold: Int = 5
+    var resetTimeoutMs: Long = 30_000L
+
+    fun build() = CircuitBreakerConfig(enabled, failureThreshold, resetTimeoutMs)
 }

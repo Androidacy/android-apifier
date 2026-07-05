@@ -18,13 +18,17 @@
 package com.androidacy.apifier.client
 
 import android.content.Context
+import android.os.Looper
 import android.util.Log
+import com.androidacy.apifier.patterns.BackoffConfig
+import com.androidacy.apifier.patterns.CircuitBreaker
 import com.androidacy.apifier.patterns.ExponentialBackoff
 import com.androidacy.apifier.progress.ProgressListener
 import com.androidacy.apifier.progress.ProgressResponseBody
 import com.androidacy.apifier.security.SecureCookieJar
 import com.google.android.gms.net.CronetProviderInstaller
 import com.google.android.gms.tasks.Tasks
+import okhttp3.Call
 import okhttp3.ConnectionPool
 import okhttp3.ConnectionSpec
 import okhttp3.Cookie
@@ -37,6 +41,7 @@ import org.chromium.net.ExperimentalCronetEngine
 import org.chromium.net.QuicOptions
 import org.json.JSONObject
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -49,9 +54,30 @@ class HttpClientBuilder(
     companion object {
         private const val TAG = "HttpClientBuilder"
         private val IDEMPOTENT_METHODS = setOf("GET", "HEAD")
+        private const val BACKOFF_SLICE_MS = 50L
     }
 
+    /**
+     * True once [build] has installed DoH-resolved HostResolverRules into the engine.
+     * False means DoH produced nothing and the engine fell back to system DNS — e.g.
+     * construction happened on the main thread (blocking I/O skipped) or the network
+     * was unavailable. Read-only to consumers.
+     */
+    var dohActive: Boolean = false
+        private set
+
+    private val breakers = ConcurrentHashMap<String, CircuitBreaker>()
+
     fun build(): OkHttpClient {
+        if (Looper.getMainLooper().isCurrentThread) {
+            Log.w(
+                TAG,
+                "ApifierClient constructed on the main thread — DoH resolution and provider " +
+                    "installation do blocking network I/O and will be skipped, degrading to system " +
+                    "DNS. Construct on a background thread; check dohActive to confirm DoH is live."
+            )
+        }
+
         val dohConfig = config.cronetConfig.dohConfig
         val resolver = if (dohConfig.enabled) DohResolver(dohConfig) else null
 
@@ -110,13 +136,28 @@ class HttpClientBuilder(
     )
 
     private fun createMainInterceptor(cookieJar: SecureCookieJar?) = okhttp3.Interceptor { chain ->
+        val cbConfig = config.circuitBreakerConfig
+        val breaker = if (cbConfig.enabled) {
+            breakers.getOrPut(chain.request().url.host) {
+                CircuitBreaker(cbConfig.failureThreshold, cbConfig.resetTimeoutMs)
+            }
+        } else null
+
+        if (breaker != null && !breaker.checkState()) {
+            throw IOException("Circuit breaker open for ${chain.request().url.host}")
+        }
+
         var attempt = 0
         var lastException: IOException? = null
-        val backoff = ExponentialBackoff()
+        // Align the backoff's own attempt ceiling with the retry loop so its -1
+        // "exceeded" sentinel is never reached from inside the loop.
+        val backoff = ExponentialBackoff(BackoffConfig(maxAttempts = config.retryConfig.maxAttempts))
         val maxAttempts = if (chain.request().tag(NoRetry::class.java) != null) 1
             else config.retryConfig.maxAttempts
 
         while (attempt < maxAttempts) {
+            if (chain.call().isCanceled()) throw IOException("Canceled")
+
             val originalRequest = chain.request()
             val req = originalRequest.newBuilder().apply {
                 config.headers.forEach { (name, value) -> header(name, value) }
@@ -136,13 +177,15 @@ class HttpClientBuilder(
                     (!config.retryConfig.retryIdempotentOnly || isIdempotent)
                 ) {
                     resp.close()
-                    attempt++
                     val delayMs = backoff.calculateDelay(attempt)
-                    if (delayMs > 0) {
-                        Thread.sleep(delayMs)
-                    }
+                    attempt++
+                    backoffSleep(delayMs, chain.call())
                     continue
                 }
+
+                // Record one outcome per call: a 5xx returned to the caller is a
+                // server failure, anything else means the host is responding.
+                if (resp.code >= 500) breaker?.recordFailure() else breaker?.recordSuccess()
 
                 cookieJar?.let { jar ->
                     resp.headers("Set-Cookie")
@@ -163,18 +206,38 @@ class HttpClientBuilder(
                 if (attempt < maxAttempts - 1 &&
                     (!config.retryConfig.retryIdempotentOnly || isIdempotent)
                 ) {
-                    attempt++
                     val delayMs = backoff.calculateDelay(attempt)
-                    if (delayMs > 0) {
-                        Thread.sleep(delayMs)
-                    }
+                    attempt++
+                    backoffSleep(delayMs, chain.call())
                     continue
                 }
+                breaker?.recordFailure()
                 throw e
             }
         }
 
+        breaker?.recordFailure()
         throw lastException ?: IOException("Request failed")
+    }
+
+    /**
+     * Sleep for [delayMs], surrendering promptly if the call is canceled. The retry loop
+     * would otherwise burn the full backoff (and every remaining attempt) after cancellation.
+     */
+    private fun backoffSleep(delayMs: Long, call: Call) {
+        if (delayMs <= 0) return
+        var remaining = delayMs
+        while (remaining > 0) {
+            if (call.isCanceled()) throw IOException("Canceled")
+            val slice = remaining.coerceAtMost(BACKOFF_SLICE_MS)
+            try {
+                Thread.sleep(slice)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw IOException("Interrupted during retry backoff", e)
+            }
+            remaining -= slice
+        }
     }
 
     @Suppress("UnsafeOptInUsageError", "DEPRECATION")
@@ -236,6 +299,7 @@ class HttpClientBuilder(
 
         // Bake pre-resolved HostResolverRules into the engine
         val hostRules = resolver?.buildHostResolverRules()
+        dohActive = hostRules != null
         if (hostRules != null) {
             val experimentalJson = JSONObject().apply {
                 put("HostResolverRules", JSONObject().put("host_resolver_rules", hostRules))

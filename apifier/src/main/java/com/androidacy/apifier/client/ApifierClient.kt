@@ -40,8 +40,17 @@ fun Request.Builder.noRetry(): Request.Builder = tag(NoRetry::class.java, NoRetr
  */
 class ApifierClient(context: Context, config: NetworkConfig) {
 
+    private val httpClientBuilder = HttpClientBuilder(context, config)
+
     /** Configured [OkHttpClient] instance. */
-    val client: OkHttpClient = HttpClientBuilder(context, config).build()
+    val client: OkHttpClient = httpClientBuilder.build()
+
+    /**
+     * True when DoH resolution succeeded and Cronet host rules were installed. False means the
+     * client degraded to system DNS — most commonly because it was constructed on the main
+     * thread (where the blocking DoH/provider I/O is skipped) or the network was unavailable.
+     */
+    val dohActive: Boolean get() = httpClientBuilder.dohActive
 
     /** Enqueues an async GET. Returns the [Call] for cancellation. */
     fun get(url: String, callback: Callback): Call {
