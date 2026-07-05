@@ -98,7 +98,6 @@ internal class DohResolver(private val config: DohConfig) {
                 queryProvider(provider, hostname)
             } catch (e: Exception) {
                 Log.d(TAG, "Provider ${provider.name} failed for $hostname: ${e.message}")
-                health.recordFailure()
                 null
             }
 
@@ -107,6 +106,10 @@ internal class DohResolver(private val config: DohConfig) {
                 cacheRecord(record)
                 return record.addresses
             }
+            // queryProvider() catches its own failures and returns null rather
+            // than throwing, so this is the one place that actually observes
+            // a provider miss — record it here, not just in the catch above.
+            health.recordFailure()
         }
 
         // Stale cache fallback
