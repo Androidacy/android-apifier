@@ -76,7 +76,7 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
 
             val valid = existing.values
                 .filter { it.expiresAt > now }
-                .map { encode(it) }
+                .mapNotNull { encode(it) }
                 .toSet()
 
             if (valid.isNotEmpty()) {
@@ -103,7 +103,7 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
 
     private fun domainKey(domain: String): String = "cookies_$domain"
 
-    private fun encode(cookie: Cookie): String {
+    private fun encode(cookie: Cookie): String? {
         val json = JSONObject().apply {
             put("n", cookie.name)
             put("v", cookie.value)
@@ -115,11 +115,15 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
             put("ho", cookie.hostOnly)
         }
         val plaintext = json.toString().toByteArray(Charsets.UTF_8)
-        return encrypt(plaintext) ?: Base64.encodeToString(plaintext, Base64.NO_WRAP)
+        // Fail closed: if encryption is unavailable, drop the cookie rather than
+        // persisting it in cleartext.
+        return encrypt(plaintext)
     }
 
-    private fun decode(encoded: String): Cookie {
-        val jsonBytes = decrypt(encoded) ?: Base64.decode(encoded, Base64.NO_WRAP)
+    private fun decode(encoded: String): Cookie? {
+        // Fail closed: only authenticated ciphertext is trusted. Anything that does
+        // not decrypt (legacy cleartext, tampered or truncated blobs) is dropped.
+        val jsonBytes = decrypt(encoded) ?: return null
         val json = JSONObject(String(jsonBytes, Charsets.UTF_8))
         return Cookie.Builder()
             .name(json.getString("n"))
@@ -142,11 +146,14 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
             cipher.init(Cipher.ENCRYPT_MODE, key)
             val iv = cipher.iv
             val ciphertext = cipher.doFinal(plaintext)
-            // Prefix IV length (1 byte) + IV + ciphertext, then Base64
-            val output = ByteArray(1 + iv.size + ciphertext.size)
-            output[0] = iv.size.toByte()
-            System.arraycopy(iv, 0, output, 1, iv.size)
-            System.arraycopy(ciphertext, 0, output, 1 + iv.size, ciphertext.size)
+            // Frame as version (1 byte) + IV length (1 byte) + IV + ciphertext, then
+            // Base64. The version tag lets decode reject anything not written as
+            // authenticated ciphertext instead of trusting it as plaintext.
+            val output = ByteArray(2 + iv.size + ciphertext.size)
+            output[0] = FORMAT_VERSION.toByte()
+            output[1] = iv.size.toByte()
+            System.arraycopy(iv, 0, output, 2, iv.size)
+            System.arraycopy(ciphertext, 0, output, 2 + iv.size, ciphertext.size)
             Base64.encodeToString(output, Base64.NO_WRAP)
         } catch (e: Exception) {
             Log.w(TAG, "Cookie encryption failed: ${e.message}")
@@ -159,17 +166,31 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
         return try {
             val raw = Base64.decode(encoded, Base64.NO_WRAP)
             if (raw.size < 2) return null
-            val ivLen = raw[0].toInt() and 0xFF
-            if (raw.size < 1 + ivLen + GCM_TAG_LENGTH / 8) return null
-            val iv = raw.copyOfRange(1, 1 + ivLen)
-            val ciphertext = raw.copyOfRange(1 + ivLen, raw.size)
-            val cipher = Cipher.getInstance(AES_GCM_TRANSFORM)
-            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH, iv))
-            cipher.doFinal(ciphertext)
+            if ((raw[0].toInt() and 0xFF) == FORMAT_VERSION) {
+                // Current framing: [version][ivLen][iv][ciphertext].
+                val ivLen = raw[1].toInt() and 0xFF
+                if (raw.size < 2 + ivLen + GCM_TAG_LENGTH / 8) return null
+                gcmDecrypt(key, raw.copyOfRange(2, 2 + ivLen), raw.copyOfRange(2 + ivLen, raw.size))
+            } else {
+                // Legacy framing [ivLen][iv][ciphertext], written before the version
+                // tag existed. Accepted only because it authenticates under our
+                // Keystore key: cleartext or attacker-substituted blobs cannot forge a
+                // valid GCM tag, so fail-closed still holds. The offsets are treated as
+                // untrusted since a mismatched first byte may just be corrupt input.
+                val ivLen = raw[0].toInt() and 0xFF
+                if (raw.size < 1 + ivLen + GCM_TAG_LENGTH / 8) return null
+                gcmDecrypt(key, raw.copyOfRange(1, 1 + ivLen), raw.copyOfRange(1 + ivLen, raw.size))
+            }
         } catch (_: Exception) {
-            // Decryption failed — may be legacy unencrypted data
+            // Bad Base64, failed GCM authentication, or unusable key — reject.
             null
         }
+    }
+
+    private fun gcmDecrypt(key: SecretKey, iv: ByteArray, ciphertext: ByteArray): ByteArray {
+        val cipher = Cipher.getInstance(AES_GCM_TRANSFORM)
+        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH, iv))
+        return cipher.doFinal(ciphertext)
     }
 
     /**
@@ -245,5 +266,6 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
         private const val KEY_ALIAS = "apifier_cookie_key"
         private const val AES_GCM_TRANSFORM = "AES/GCM/NoPadding"
         private const val GCM_TAG_LENGTH = 128
+        private const val FORMAT_VERSION = 1
     }
 }
