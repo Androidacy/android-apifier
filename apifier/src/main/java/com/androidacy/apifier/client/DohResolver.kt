@@ -481,8 +481,16 @@ internal class DohResolver(private val config: DohConfig) {
             queryBinary(provider, hostname, queryType)
         } catch (e: Exception) {
             Log.d(TAG, "Binary query (type=$queryType) failed for ${provider.name}, trying JSON: ${e.message}")
+            val binaryFailure = classifyThrowable(e)
             // Fallback: JSON GET
-            queryJson(provider, hostname, queryType)
+            try {
+                queryJson(provider, hostname, queryType)
+            } catch (jsonException: Exception) {
+                throw DohQueryException(
+                    moreSignificant(binaryFailure, classifyThrowable(jsonException)) ?: binaryFailure,
+                    "Binary and JSON DoH queries both failed: ${jsonException.message}"
+                )
+            }
         }
     }
 
