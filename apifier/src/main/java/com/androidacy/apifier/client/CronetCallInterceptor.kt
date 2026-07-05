@@ -17,6 +17,7 @@ package com.androidacy.apifier.client
 
 import android.os.Looper
 import android.util.Log
+import com.androidacy.apifier.progress.ProgressListener
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Protocol
@@ -156,7 +157,10 @@ class CronetCallInterceptor(
                 if (!hasContentType) {
                     body.contentType()?.let { addHeader("Content-Type", it.toString()) }
                 }
-                setUploadDataProvider(OkHttpUploadDataProvider(body), executor)
+                setUploadDataProvider(
+                    OkHttpUploadDataProvider(body, request.tag(ProgressListener::class.java)),
+                    executor
+                )
             }
         }.build()
 
@@ -258,9 +262,15 @@ class CronetCallInterceptor(
 
     /**
      * Bridges OkHttp [okhttp3.RequestBody] to Cronet's [UploadDataProvider].
+     *
+     * The body is buffered into memory once; Cronet then pulls it in chunks via [read].
+     * Upload progress is reported from those pulls, so it tracks bytes handed to the
+     * transport's send buffer rather than on-wire acknowledgements. Large uploads are
+     * still fully buffered — true streaming is a separate concern.
      */
     private class OkHttpUploadDataProvider(
-        private val body: okhttp3.RequestBody
+        private val body: okhttp3.RequestBody,
+        private val progressListener: ProgressListener? = null
     ) : UploadDataProvider() {
 
         private val data by lazy {
@@ -279,11 +289,13 @@ class CronetCallInterceptor(
                 byteBuffer.put(data, offset, toWrite)
                 offset += toWrite
             }
+            progressListener?.update(offset.toLong(), data.size.toLong(), offset >= data.size)
             uploadDataSink.onReadSucceeded(false)
         }
 
         override fun rewind(uploadDataSink: UploadDataSink) {
             offset = 0
+            progressListener?.update(0, data.size.toLong(), false)
             uploadDataSink.onRewindSucceeded()
         }
     }
