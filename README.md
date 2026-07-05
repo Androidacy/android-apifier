@@ -1,5 +1,6 @@
 # Android Apifier
 
+[![Release](https://img.shields.io/github/v/release/Androidacy/android-apifier?sort=semver)](https://github.com/Androidacy/android-apifier/releases/latest)
 [![](https://jitpack.io/v/Androidacy/android-apifier.svg)](https://jitpack.io/#Androidacy/android-apifier)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
@@ -29,7 +30,7 @@ Add dependency:
 
 ```gradle
 dependencies {
-    implementation 'com.github.Androidacy:android-apifier:1.0.0'
+    implementation 'com.github.Androidacy:android-apifier:1.6.0'
 }
 ```
 
@@ -101,6 +102,27 @@ client.download(url, object : ProgressListener {
     }
 }, callback)
 ```
+
+## Security
+
+TLS trust for API traffic runs through Cronet, which honors your app's
+[Network Security Configuration](https://developer.android.com/privacy-and-security/security-config).
+Configure trust anchors, certificate pinning, and cleartext policy there — the
+library does not override them:
+
+```xml
+<network-security-config>
+    <domain-config>
+        <domain includeSubdomains="true">api.example.com</domain>
+        <pin-set>
+            <pin digest="SHA-256">base64EncodedPin==</pin>
+        </pin-set>
+    </domain-config>
+</network-security-config>
+```
+
+Cookies are stored encrypted with a hardware-backed AES-GCM key, and DoH bootstrap
+connections are validated against system CAs only.
 
 ## Requirements
 
