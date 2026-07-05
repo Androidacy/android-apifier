@@ -26,26 +26,40 @@ import okhttp3.CookieJar
 import okhttp3.HttpUrl
 import org.json.JSONObject
 import java.security.KeyStore
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantReadWriteLock
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 
 /** [CookieJar] backed by a [CookieStorage]. Cookies are JSON-serialized, AES-GCM encrypted via Android Keystore, and Base64-encoded. */
 class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
 
     private val secretKey: SecretKey? = loadOrCreateKey()
 
-    @Synchronized
-    override fun loadForRequest(url: HttpUrl): List<Cookie> {
+    // Write-through cache of decoded cookies keyed by domain. The hot request path
+    // (loadForRequest, once per request) would otherwise re-decrypt every cookie of
+    // every domain — a Keystore binder IPC each. Reads take the shared read lock so
+    // concurrent requests no longer serialize; writes (saveFromResponse) take the
+    // write lock and refresh the affected domain, so the consumer's CookieStorage is
+    // never touched by a read and a write at the same time.
+    private val decodedCache = ConcurrentHashMap<String, List<Cookie>>()
+    private val lock = ReentrantReadWriteLock()
+
+    override fun loadForRequest(url: HttpUrl): List<Cookie> = lock.read {
         val now = System.currentTimeMillis()
         val result = mutableListOf<Cookie>()
 
         // Check all stored domains for cookies that match this URL
         for (domain in getStoredDomains()) {
-            val cookies = storage.getStringSet(domainKey(domain), null)
-                ?.mapNotNull { encoded -> runCatching { decode(encoded) }.getOrNull() }
-                ?: continue
+            val cookies = decodedCache.computeIfAbsent(domain) { d ->
+                storage.getStringSet(domainKey(d), null)
+                    ?.mapNotNull { encoded -> runCatching { decode(encoded) }.getOrNull() }
+                    ?: emptyList()
+            }
 
             for (cookie in cookies) {
                 if (cookie.expiresAt <= now) continue
@@ -53,12 +67,11 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
                 result.add(cookie)
             }
         }
-        return result
+        result
     }
 
-    @Synchronized
-    override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
-        if (cookies.isEmpty()) return
+    override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) = lock.write {
+        if (cookies.isEmpty()) return@write
 
         val now = System.currentTimeMillis()
         val domainsChanged = mutableSetOf<String>()
@@ -74,15 +87,15 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
 
             existing[cookie.name to cookie.path] = cookie
 
-            val valid = existing.values
-                .filter { it.expiresAt > now }
-                .mapNotNull { encode(it) }
-                .toSet()
+            val validCookies = existing.values.filter { it.expiresAt > now }
+            val encoded = validCookies.mapNotNull { encode(it) }.toSet()
 
-            if (valid.isNotEmpty()) {
-                storage.putStringSet(domainKey(domain), valid)
+            if (encoded.isNotEmpty()) {
+                storage.putStringSet(domainKey(domain), encoded)
+                decodedCache[domain] = validCookies
             } else {
                 storage.remove(domainKey(domain))
+                decodedCache.remove(domain)
             }
         }
 
