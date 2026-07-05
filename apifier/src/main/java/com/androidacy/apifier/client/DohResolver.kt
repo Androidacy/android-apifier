@@ -55,6 +55,34 @@ internal class DohResolver(private val config: DohConfig) {
         }
     }
 
+    /**
+     * Categorizes why a DoH query failed to resolve a domain, so `resolve()` can
+     * log a single actionable reason instead of silently returning null.
+     * Ordinal order doubles as precedence (lower ordinal = more significant) —
+     * see [moreSignificant].
+     */
+    private enum class DohFailure { NO_DOMAIN, SERVER_ERROR, INVALID_RESPONSE, NETWORK_ERROR }
+
+    /** Carries a [DohFailure] category alongside the human-readable message. */
+    private class DohQueryException(val failure: DohFailure, message: String) : Exception(message)
+
+    /** Maps a caught throwable to its [DohFailure] category. */
+    private fun classifyThrowable(t: Throwable): DohFailure = when {
+        t is DohQueryException -> t.failure
+        t is java.io.IOException -> DohFailure.NETWORK_ERROR
+        else -> DohFailure.INVALID_RESPONSE
+    }
+
+    /**
+     * Combines two (possibly absent) failures, keeping the higher-precedence one:
+     * NO_DOMAIN > SERVER_ERROR > INVALID_RESPONSE > NETWORK_ERROR.
+     */
+    private fun moreSignificant(a: DohFailure?, b: DohFailure?): DohFailure? {
+        if (a == null) return b
+        if (b == null) return a
+        return if (a.ordinal <= b.ordinal) a else b
+    }
+
     private class ProviderHealth {
         private val consecutiveFailures = AtomicInteger(0)
         private val backoffUntilMillis = AtomicLong(0)
@@ -337,7 +365,9 @@ internal class DohResolver(private val config: DohConfig) {
             val n = stream.read(buf)
             if (n == -1) break
             total += n
-            if (total > maxSize) throw Exception("DNS response exceeds $maxSize bytes")
+            if (total > maxSize) {
+                throw DohQueryException(DohFailure.INVALID_RESPONSE, "DNS response exceeds $maxSize bytes")
+            }
             baos.write(buf, 0, n)
         }
         return baos.toByteArray()
@@ -444,7 +474,10 @@ internal class DohResolver(private val config: DohConfig) {
             conn.outputStream.use { it.write(wireQuery) }
 
             if (conn.responseCode != 200) {
-                throw Exception("DoH binary query returned HTTP ${conn.responseCode}")
+                throw DohQueryException(
+                    DohFailure.SERVER_ERROR,
+                    "DoH binary query returned HTTP ${conn.responseCode}"
+                )
             }
 
             val responseBytes = conn.inputStream.use { readBounded(it, MAX_DNS_RESPONSE_SIZE) }
@@ -467,17 +500,23 @@ internal class DohResolver(private val config: DohConfig) {
             conn.readTimeout = config.queryTimeoutMs
 
             if (conn.responseCode != 200) {
-                throw Exception("DoH JSON query returned HTTP ${conn.responseCode}")
+                throw DohQueryException(
+                    DohFailure.SERVER_ERROR,
+                    "DoH JSON query returned HTTP ${conn.responseCode}"
+                )
             }
 
             val bodyBytes = conn.inputStream.use { readBounded(it, MAX_DNS_RESPONSE_SIZE) }
             val json = JSONObject(String(bodyBytes, Charsets.UTF_8))
 
-            if (json.optInt("Status", -1) != 0) {
-                throw Exception("DoH JSON returned non-zero status: ${json.optInt("Status")}")
+            val status = json.optInt("Status", -1)
+            if (status != 0) {
+                val failure = if (status == 3) DohFailure.NO_DOMAIN else DohFailure.SERVER_ERROR
+                throw DohQueryException(failure, "DoH JSON returned non-zero status: $status")
             }
 
-            val answers = json.optJSONArray("Answer") ?: throw Exception("No Answer section")
+            val answers = json.optJSONArray("Answer")
+                ?: throw DohQueryException(DohFailure.NO_DOMAIN, "No Answer section")
             val addresses = mutableListOf<String>()
             var minTtl = Long.MAX_VALUE
 
@@ -494,7 +533,9 @@ internal class DohResolver(private val config: DohConfig) {
                 }
             }
 
-            if (addresses.isEmpty()) throw Exception("No ${typeParam} records in JSON response")
+            if (addresses.isEmpty()) {
+                throw DohQueryException(DohFailure.NO_DOMAIN, "No $typeParam records in JSON response")
+            }
 
             return DnsRecord(
                 hostname = hostname,
@@ -562,11 +603,19 @@ internal class DohResolver(private val config: DohConfig) {
         data: ByteArray,
         expectedType: Int = DNS_TYPE_A
     ): DnsRecord {
-        if (data.size < 12) throw Exception("DNS response too short")
+        if (data.size < 12) {
+            throw DohQueryException(DohFailure.INVALID_RESPONSE, "DNS response too short")
+        }
 
         // Check RCODE in flags (lower 4 bits of byte 3)
         val rcode = data[3].toInt() and 0x0F
-        if (rcode != 0) throw Exception("DNS response RCODE=$rcode (expected NOERROR)")
+        if (rcode != 0) {
+            // RCODE=3 (NXDOMAIN) is authoritative "name doesn't exist"; every
+            // other nonzero RCODE (SERVFAIL, NOTIMP, REFUSED, ...) means the
+            // provider was reached but answered with a server-side error.
+            val failure = if (rcode == 3) DohFailure.NO_DOMAIN else DohFailure.SERVER_ERROR
+            throw DohQueryException(failure, "DNS response RCODE=$rcode (expected NOERROR)")
+        }
 
         val qdcount = ((data[4].toInt() and 0xFF) shl 8) or (data[5].toInt() and 0xFF)
         val ancount = ((data[6].toInt() and 0xFF) shl 8) or (data[7].toInt() and 0xFF)
@@ -616,7 +665,11 @@ internal class DohResolver(private val config: DohConfig) {
         }
 
         val typeName = if (expectedType == DNS_TYPE_AAAA) "AAAA" else "A"
-        if (addresses.isEmpty()) throw Exception("No $typeName records in DNS wire response")
+        if (addresses.isEmpty()) {
+            // NOERROR but no usable A/AAAA records (NODATA) — folded into
+            // NO_DOMAIN: "no usable address for this name" either way.
+            throw DohQueryException(DohFailure.NO_DOMAIN, "No $typeName records in DNS wire response")
+        }
 
         return DnsRecord(
             hostname = hostname,
@@ -636,13 +689,17 @@ internal class DohResolver(private val config: DohConfig) {
             }
             if ((len and 0xC0) == 0xC0) {
                 // Pointer (2 bytes)
-                if (offset + 1 >= data.size) throw Exception("Truncated DNS pointer")
+                if (offset + 1 >= data.size) {
+                    throw DohQueryException(DohFailure.INVALID_RESPONSE, "Truncated DNS pointer")
+                }
                 return offset + 2
             }
             offset += 1 + len
-            if (++jumps > 128) throw Exception("DNS name too long or pointer loop")
+            if (++jumps > 128) {
+                throw DohQueryException(DohFailure.INVALID_RESPONSE, "DNS name too long or pointer loop")
+            }
         }
-        throw Exception("DNS name extends beyond packet")
+        throw DohQueryException(DohFailure.INVALID_RESPONSE, "DNS name extends beyond packet")
     }
 
     /** Quick local check: does any network interface have a global IPv6 address? */

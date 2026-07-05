@@ -62,6 +62,98 @@ class DohResolverTest {
         return method.invoke(resolver, ip) as Boolean
     }
 
+    // --- Reflection helpers for the private DohFailure classification core ---
+
+    private fun dohFailureClass(): Class<*> =
+        DohResolver::class.java.declaredClasses.first { it.simpleName == "DohFailure" }
+
+    private fun dohQueryExceptionClass(): Class<*> =
+        DohResolver::class.java.declaredClasses.first { it.simpleName == "DohQueryException" }
+
+    private fun dohFailureValue(name: String): Any =
+        dohFailureClass().enumConstants!!.first { (it as Enum<*>).name == name }
+
+    private fun newDohQueryException(failureName: String, message: String): Throwable {
+        val ctor = dohQueryExceptionClass().getDeclaredConstructor(dohFailureClass(), String::class.java)
+        ctor.isAccessible = true
+        return ctor.newInstance(dohFailureValue(failureName), message) as Throwable
+    }
+
+    private fun invokeMoreSignificant(a: Any?, b: Any?): String? {
+        val method = DohResolver::class.java.getDeclaredMethod(
+            "moreSignificant",
+            dohFailureClass(),
+            dohFailureClass()
+        )
+        method.isAccessible = true
+        return (method.invoke(resolver, a, b) as? Enum<*>)?.name
+    }
+
+    private fun invokeClassifyThrowable(t: Throwable): String {
+        val method = DohResolver::class.java.getDeclaredMethod("classifyThrowable", Throwable::class.java)
+        method.isAccessible = true
+        return (method.invoke(resolver, t) as Enum<*>).name
+    }
+
+    /** Reads the private `.failure` field off a caught [DohQueryException] instance. */
+    private fun failureNameOf(e: Throwable): String {
+        val field = e.javaClass.getDeclaredField("failure")
+        field.isAccessible = true
+        return (field.get(e) as Enum<*>).name
+    }
+
+    @Test
+    fun moreSignificantOrdersByPrecedence() {
+        val noDomain = dohFailureValue("NO_DOMAIN")
+        val serverError = dohFailureValue("SERVER_ERROR")
+        val networkError = dohFailureValue("NETWORK_ERROR")
+        val invalidResponse = dohFailureValue("INVALID_RESPONSE")
+
+        assertEquals("NO_DOMAIN", invokeMoreSignificant(networkError, noDomain))
+        assertEquals("SERVER_ERROR", invokeMoreSignificant(serverError, invalidResponse))
+        assertEquals("INVALID_RESPONSE", invokeMoreSignificant(invalidResponse, networkError))
+        assertEquals("NO_DOMAIN", invokeMoreSignificant(serverError, noDomain))
+        assertEquals("SERVER_ERROR", invokeMoreSignificant(null, serverError))
+        assertNull(invokeMoreSignificant(null, null))
+    }
+
+    @Test
+    fun classifyThrowableMapsByType() {
+        assertEquals("NETWORK_ERROR", invokeClassifyThrowable(java.net.SocketTimeoutException("timeout")))
+        assertEquals("NETWORK_ERROR", invokeClassifyThrowable(java.net.ConnectException("refused")))
+        assertEquals("NETWORK_ERROR", invokeClassifyThrowable(javax.net.ssl.SSLException("tls failure")))
+        assertEquals("NETWORK_ERROR", invokeClassifyThrowable(java.net.UnknownHostException("nope")))
+        assertEquals("NETWORK_ERROR", invokeClassifyThrowable(java.io.IOException("io")))
+        assertEquals("INVALID_RESPONSE", invokeClassifyThrowable(RuntimeException("boom")))
+        assertEquals("SERVER_ERROR", invokeClassifyThrowable(newDohQueryException("SERVER_ERROR", "x")))
+    }
+
+    @Test
+    fun parseDnsWireResponseCategorizesCorruptedBytes() {
+        val query = resolver.buildDnsWireQuery("cloudflare.com", 1)
+        val responseBytes = postDnsWireQuery(query)
+
+        val nxdomainBytes = responseBytes.copyOf()
+        nxdomainBytes[3] = ((nxdomainBytes[3].toInt() and 0xF0) or 0x03).toByte()
+        val nxEx = assertThrows(Exception::class.java) {
+            resolver.parseDnsWireResponse("cloudflare.com", nxdomainBytes, 1)
+        }
+        assertEquals("NO_DOMAIN", failureNameOf(nxEx))
+
+        val servfailBytes = responseBytes.copyOf()
+        servfailBytes[3] = ((servfailBytes[3].toInt() and 0xF0) or 0x02).toByte()
+        val servfailEx = assertThrows(Exception::class.java) {
+            resolver.parseDnsWireResponse("cloudflare.com", servfailBytes, 1)
+        }
+        assertEquals("SERVER_ERROR", failureNameOf(servfailEx))
+
+        val tooShort = responseBytes.copyOfRange(0, 8)
+        val shortEx = assertThrows(Exception::class.java) {
+            resolver.parseDnsWireResponse("cloudflare.com", tooShort, 1)
+        }
+        assertEquals("INVALID_RESPONSE", failureNameOf(shortEx))
+    }
+
     @Test
     fun resolvesRealHostnameToPublicIps() {
         val addresses = resolver.resolve("cloudflare.com")
