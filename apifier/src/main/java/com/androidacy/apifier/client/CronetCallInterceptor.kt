@@ -23,6 +23,7 @@ import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.asResponseBody
 import okio.Buffer
+import okio.ForwardingSource
 import okio.Pipe
 import okio.buffer
 import org.chromium.net.CronetEngine
@@ -37,10 +38,12 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /** OkHttp interceptor that routes requests through a [CronetEngine] for QUIC/HTTP3 support. */
 class CronetCallInterceptor(
     private val engine: CronetEngine,
+    private val readTimeoutMillis: Long,
     private val executor: Executor = Executors.newCachedThreadPool { r ->
         Thread(r, "Cronet-IO").apply { isDaemon = true }
     }
@@ -63,7 +66,10 @@ class CronetCallInterceptor(
 
         val headersLatch = CountDownLatch(1)
         var responseInfo: UrlResponseInfo? = null
-        var callbackError: IOException? = null
+        // Written on the Cronet callback thread, read on the consumer's reading
+        // thread (including at end-of-stream, after the headers latch is released),
+        // so visibility must not rely on the latch alone.
+        val callbackError = AtomicReference<IOException?>()
         val pipe = Pipe(PIPE_BUFFER_SIZE)
         val transferBuffer = Buffer()
 
@@ -78,13 +84,13 @@ class CronetCallInterceptor(
                 redirectCount++
                 if (redirectCount > MAX_REDIRECTS) {
                     req.cancel()
-                    callbackError = IOException("Too many redirects ($MAX_REDIRECTS)")
+                    callbackError.set(IOException("Too many redirects ($MAX_REDIRECTS)"))
                     headersLatch.countDown()
                     return
                 }
                 if (!newLocationUrl.startsWith("https://", ignoreCase = true)) {
                     req.cancel()
-                    callbackError = IOException("Redirect to non-HTTPS URL rejected: $newLocationUrl")
+                    callbackError.set(IOException("Redirect to non-HTTPS URL rejected: $newLocationUrl"))
                     headersLatch.countDown()
                     return
                 }
@@ -108,7 +114,12 @@ class CronetCallInterceptor(
                     pipe.sink.write(transferBuffer, transferBuffer.size)
                     pipe.sink.flush()
                 } catch (_: Exception) {
-                    return // consumer closed pipe
+                    // The consumer closed (or canceled) the pipe. Cronet only
+                    // advances a request via read()/cancel(), so without this the
+                    // request would stay paused for the engine's lifetime, leaking
+                    // the connection and the upload provider.
+                    req.cancel()
+                    return
                 }
                 byteBuffer.clear()
                 req.read(byteBuffer)
@@ -127,7 +138,7 @@ class CronetCallInterceptor(
                 info: UrlResponseInfo?,
                 error: CronetException
             ) {
-                callbackError = IOException("Cronet request failed", error)
+                callbackError.set(IOException("Cronet request failed", error))
                 headersLatch.countDown()
                 try { pipe.sink.close() } catch (_: Exception) {}
             }
@@ -159,7 +170,7 @@ class CronetCallInterceptor(
             }
         }
 
-        callbackError?.let { throw it }
+        callbackError.get()?.let { throw it }
         val info = responseInfo ?: throw IOException("No response received from Cronet")
 
         // Cronet natively decodes certain encodings. When it does, the original
@@ -180,7 +191,46 @@ class CronetCallInterceptor(
             try { pipe.sink.close() } catch (_: Exception) {}
             Buffer().asResponseBody(contentType?.toMediaTypeOrNull(), 0)
         } else {
-            pipe.source.buffer().asResponseBody(contentType?.toMediaTypeOrNull(), contentLength)
+            // The body is a Pipe with no timeout, and this application interceptor
+            // never returns through chain.proceed(), so OkHttp's read/write timeouts
+            // and callTimeout do not reach the body path. Bound both ends ourselves:
+            // a stalled read (server sends headers then hangs) or a stalled sink (an
+            // abandoned body that never gets drained) unblocks after readTimeoutMillis.
+            pipe.source.timeout().timeout(readTimeoutMillis, TimeUnit.MILLISECONDS)
+            pipe.sink.timeout().timeout(readTimeoutMillis, TimeUnit.MILLISECONDS)
+            val source = object : ForwardingSource(pipe.source) {
+                override fun read(sink: Buffer, byteCount: Long): Long {
+                    if (call.isCanceled()) {
+                        urlRequest.cancel()
+                        throw IOException("Canceled")
+                    }
+                    val bytesRead = try {
+                        super.read(sink, byteCount)
+                    } catch (e: IOException) {
+                        // Read deadline elapsed or the pipe was canceled: tear down
+                        // the Cronet request so it is not left running.
+                        urlRequest.cancel()
+                        throw e
+                    }
+                    if (bytesRead == -1L) {
+                        // Okio's Pipe has no error channel: a mid-body Cronet failure
+                        // closes the sink, which reaches the reader as a clean EOF. Raise
+                        // the recorded error so the caller sees the failure instead of a
+                        // silently truncated body.
+                        callbackError.get()?.let { throw it }
+                    }
+                    return bytesRead
+                }
+
+                override fun close() {
+                    // An early close (e.g. the 5xx retry path closing the body) must
+                    // cancel the request, otherwise it stalls as above. Cancelling an
+                    // already-completed request is a no-op.
+                    urlRequest.cancel()
+                    super.close()
+                }
+            }
+            source.buffer().asResponseBody(contentType?.toMediaTypeOrNull(), contentLength)
         }
 
         val responseBuilder = Response.Builder()

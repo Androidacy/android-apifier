@@ -83,7 +83,7 @@ class HttpClientBuilder(
         val cookieJar = config.cookieStorage?.let { SecureCookieJar(it) }
         builder.addInterceptor(createMainInterceptor(cookieJar))
 
-        builder.addInterceptor(CronetCallInterceptor(engine))
+        builder.addInterceptor(CronetCallInterceptor(engine, config.timeouts.read.inWholeMilliseconds))
 
         return builder.build()
     }
