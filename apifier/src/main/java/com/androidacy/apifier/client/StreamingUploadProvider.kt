@@ -48,6 +48,14 @@ internal class StreamingUploadProvider(
         val requested = byteBuffer.remaining().toLong()
         val read = source.read(transfer, requested)
         val exhausted = read == -1L
+        // A body that advertised a known length but ran dry before delivering it (a file
+        // truncated after contentLength() was read, an over-reporting custom body) has nothing
+        // valid left to hand back; a zero-byte non-final read is not a legal chunked-only signal
+        // here, so this fails the upload instead of reporting a false success.
+        if (exhausted && total >= 0) {
+            uploadDataSink.onReadError(IOException("body ended after $sent of $total bytes"))
+            return
+        }
         if (!exhausted) {
             transfer.read(byteBuffer)
             sent += read

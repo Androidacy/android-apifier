@@ -53,27 +53,35 @@ class MultipartBody private constructor(
      * Frame headers and trailers are tiny generated buffers; only part bodies can be large, so
      * they stream from their own [pullSource][RequestBody.pullSource] instead of being written
      * into a shared sink up front.
+     *
+     * Each part's [pullSource][RequestBody.pullSource] runs lazily, only once [SequencedSource]
+     * reaches it and has already closed the part before it: a 20-part body never holds more than
+     * one part's handle open, and a part that fails to open never strands the ones opened ahead
+     * of it, because none of them are opened ahead of it.
      */
     override fun pullSource(): Source {
-        val sources = mutableListOf<Source>()
+        val factories = mutableListOf<() -> Source>()
         for (part in parts) {
-            sources += Buffer().apply {
-                writeUtf8("--").writeUtf8(boundary).writeUtf8(CRLF)
-                writeUtf8("Content-Disposition: form-data; name=")
-                writeQuoted(this, part.name)
-                if (part.filename != null) {
-                    writeUtf8("; filename=")
-                    writeQuoted(this, part.filename)
+            factories += {
+                Buffer().apply {
+                    writeUtf8("--").writeUtf8(boundary).writeUtf8(CRLF)
+                    writeUtf8("Content-Disposition: form-data; name=")
+                    writeQuoted(this, part.name)
+                    if (part.filename != null) {
+                        writeUtf8("; filename=")
+                        writeQuoted(this, part.filename)
+                    }
+                    writeUtf8(CRLF)
+                    part.body.contentType()
+                        ?.let { writeUtf8("Content-Type: ").writeUtf8(it.toString()).writeUtf8(CRLF) }
+                    writeUtf8(CRLF)
                 }
-                writeUtf8(CRLF)
-                part.body.contentType()?.let { writeUtf8("Content-Type: ").writeUtf8(it.toString()).writeUtf8(CRLF) }
-                writeUtf8(CRLF)
             }
-            sources += part.body.pullSource()
-            sources += Buffer().writeUtf8(CRLF)
+            factories += { part.body.pullSource() }
+            factories += { Buffer().writeUtf8(CRLF) }
         }
-        sources += Buffer().writeUtf8("--").writeUtf8(boundary).writeUtf8("--").writeUtf8(CRLF)
-        return SequencedSource(sources)
+        factories += { Buffer().writeUtf8("--").writeUtf8(boundary).writeUtf8("--").writeUtf8(CRLF) }
+        return SequencedSource(factories)
     }
 
     private fun writeOrCount(sink: BufferedSink?): Long {
@@ -162,15 +170,22 @@ class MultipartBody private constructor(
     }
 }
 
-/** Reads [sources] one after another, closing each as it is exhausted. */
-private class SequencedSource(private val sources: List<Source>) : Source {
+/**
+ * Opens each of [factories] only when reading reaches it, and closes it before opening the next,
+ * so at most one is ever open. A factory that throws leaves nothing new to close; whatever came
+ * before it is already closed by the time it runs.
+ */
+private class SequencedSource(private val factories: List<() -> Source>) : Source {
     private var index = 0
+    private var current: Source? = null
 
     override fun read(sink: Buffer, byteCount: Long): Long {
-        while (index < sources.size) {
-            val read = sources[index].read(sink, byteCount)
+        while (index < factories.size) {
+            val source = current ?: factories[index]().also { current = it }
+            val read = source.read(sink, byteCount)
             if (read != -1L) return read
-            sources[index].close()
+            source.close()
+            current = null
             index++
         }
         return -1L
@@ -179,9 +194,8 @@ private class SequencedSource(private val sources: List<Source>) : Source {
     override fun timeout(): Timeout = Timeout.NONE
 
     override fun close() {
-        while (index < sources.size) {
-            sources[index].close()
-            index++
-        }
+        current?.close()
+        current = null
+        index = factories.size
     }
 }

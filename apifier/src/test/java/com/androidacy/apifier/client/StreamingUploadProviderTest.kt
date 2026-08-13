@@ -20,6 +20,7 @@ import com.androidacy.apifier.http.MultipartBody
 import com.androidacy.apifier.http.RequestBody
 import com.androidacy.apifier.http.RequestBody.Companion.asRequestBody
 import java.io.File
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicInteger
 import okio.Buffer
@@ -65,6 +66,23 @@ class StreamingUploadProviderTest {
             assertTrue("a single read produced $produced > chunk size $chunkSize", produced <= chunkSize)
         }
         assertEquals(totalLength, source.producedPerCall.sum())
+    }
+
+    @Test
+    fun earlyExhaustionOnKnownLengthBodySurfacesReadError() {
+        // Advertises 50 bytes but its source only ever has 20: a file truncated after
+        // contentLength() was read, or a body that simply over-reports.
+        val body = InstrumentedBody(50L, CountingSource(20L))
+        val provider = StreamingUploadProvider(body, null)
+        val sink = RecordingSink()
+
+        provider.read(sink, ByteBuffer.allocate(16)) // 16 of 20
+        provider.read(sink, ByteBuffer.allocate(16)) // remaining 4
+        provider.read(sink, ByteBuffer.allocate(16)) // source now exhausted, 30 bytes short
+
+        assertEquals(listOf(false, false), sink.readSucceededCalls)
+        assertNotNull("expected a read error instead of a silent zero-byte success", sink.readError)
+        assertTrue(sink.readError?.message.orEmpty().contains("20 of 50"))
     }
 
     @Test
@@ -161,6 +179,38 @@ class StreamingUploadProviderTest {
         assertTrue("more than one part must never be open at once, peak was ${peakOpen.get()}", peakOpen.get() <= 1)
     }
 
+    @Test
+    fun multipartLeavesEarlierPartsClosedWhenALaterPartFailsToOpen() {
+        val openCounter = AtomicInteger(0)
+        val peakOpen = AtomicInteger(0)
+        val partA = TrackingBody(ByteArray(10) { 'a'.code.toByte() }, openCounter, peakOpen)
+        val failingPart = object : RequestBody() {
+            override fun contentType(): MediaType? = null
+
+            override fun contentLength(): Long = 10L
+
+            override fun writeTo(sink: BufferedSink) = throw UnsupportedOperationException()
+
+            override fun pullSource(): Source = throw IOException("part source unavailable")
+        }
+        val multipart = MultipartBody.Builder()
+            .addFormDataPart("a", "a.bin", partA)
+            .addFormDataPart("b", "b.bin", failingPart)
+            .build()
+
+        val source = multipart.pullSource()
+        val buffer = Buffer()
+        val thrown = try {
+            while (source.read(buffer, 8) != -1L) buffer.clear()
+            null
+        } catch (e: IOException) {
+            e
+        }
+
+        assertNotNull("expected the failing part's pullSource to propagate", thrown)
+        assertEquals("part A's source must already be closed, not stranded open", 0, openCounter.get())
+    }
+
     private fun readAll(provider: StreamingUploadProvider, sink: RecordingSink, expectedLength: Int): ByteArray {
         val out = Buffer()
         while (out.size < expectedLength) {
@@ -182,13 +232,14 @@ class StreamingUploadProviderTest {
         val readSucceededCalls = mutableListOf<Boolean>()
         var rewindSucceeded = false
         var rewindError: Exception? = null
+        var readError: Exception? = null
 
         override fun onReadSucceeded(finalChunk: Boolean) {
             readSucceededCalls += finalChunk
         }
 
         override fun onReadError(exception: Exception) {
-            throw exception
+            readError = exception
         }
 
         override fun onRewindSucceeded() {
@@ -233,7 +284,12 @@ class StreamingUploadProviderTest {
         override fun pullSource(): Source = source
     }
 
-    /** A file-shaped part whose pull source reports how many parts are concurrently mid-stream. */
+    /**
+     * A file-shaped part that counts as open from the moment [pullSource] is called, not from
+     * its first [Source.read]: eager opening at [pullSource] time is exactly the defect this
+     * counts, and a tracker keyed off the first read cannot see it, since by the time anything
+     * reads a part, an eager caller has already opened every part there is.
+     */
     private class TrackingBody(
         private val bytes: ByteArray,
         private val openCounter: AtomicInteger,
@@ -248,29 +304,27 @@ class StreamingUploadProviderTest {
             sink.write(bytes)
         }
 
-        override fun pullSource(): Source = object : Source {
-            private var offset = 0
-            private var opened = false
-            private var closed = false
+        override fun pullSource(): Source {
+            peakOpen.updateAndGet { maxOf(it, openCounter.incrementAndGet()) }
+            return object : Source {
+                private var offset = 0
+                private var closed = false
 
-            override fun read(sink: Buffer, byteCount: Long): Long {
-                if (!opened) {
-                    opened = true
-                    peakOpen.updateAndGet { maxOf(it, openCounter.incrementAndGet()) }
+                override fun read(sink: Buffer, byteCount: Long): Long {
+                    if (offset >= bytes.size) return -1L
+                    val n = minOf(byteCount, (bytes.size - offset).toLong()).toInt()
+                    sink.write(bytes, offset, n)
+                    offset += n
+                    return n.toLong()
                 }
-                if (offset >= bytes.size) return -1L
-                val n = minOf(byteCount, (bytes.size - offset).toLong()).toInt()
-                sink.write(bytes, offset, n)
-                offset += n
-                return n.toLong()
-            }
 
-            override fun timeout(): Timeout = Timeout.NONE
+                override fun timeout(): Timeout = Timeout.NONE
 
-            override fun close() {
-                if (opened && !closed) {
-                    closed = true
-                    openCounter.decrementAndGet()
+                override fun close() {
+                    if (!closed) {
+                        closed = true
+                        openCounter.decrementAndGet()
+                    }
                 }
             }
         }
