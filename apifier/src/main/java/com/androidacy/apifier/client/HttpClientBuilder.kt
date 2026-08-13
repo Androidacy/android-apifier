@@ -25,13 +25,11 @@ import com.androidacy.apifier.patterns.CircuitBreaker
 import com.androidacy.apifier.patterns.ExponentialBackoff
 import com.androidacy.apifier.progress.ProgressListener
 import com.androidacy.apifier.progress.ProgressResponseBody
-import com.androidacy.apifier.security.SecureCookieJar
 import com.google.android.gms.net.CronetProviderInstaller
 import com.google.android.gms.tasks.Tasks
 import okhttp3.Call
 import okhttp3.ConnectionPool
 import okhttp3.ConnectionSpec
-import okhttp3.Cookie
 import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 import org.chromium.net.CronetEngine
@@ -44,7 +42,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
-/** Assembles an [OkHttpClient] with Cronet transport, retries, and cookie support. */
+/** Assembles an [OkHttpClient] with Cronet transport and retries. */
 class HttpClientBuilder(
     private val context: Context,
     private val config: NetworkConfig
@@ -108,8 +106,10 @@ class HttpClientBuilder(
             connectionPool(createConnectionPool())
         }
 
-        val cookieJar = config.cookieStorage?.let { SecureCookieJar(it) }
-        builder.addInterceptor(createMainInterceptor(cookieJar))
+        // config.cookieStorage is unused here: SecureCookieJar now speaks apifier's Cookie/Uri,
+        // not okhttp3's, so persistence is inert until T9 rebuilds it as a pipeline stage.
+        // A boundary conversion here would just get deleted when that stage lands.
+        builder.addInterceptor(createMainInterceptor())
 
         builder.addInterceptor(CronetCallInterceptor(engine, config.timeouts.read.inWholeMilliseconds))
 
@@ -137,7 +137,7 @@ class HttpClientBuilder(
         TimeUnit.MILLISECONDS
     )
 
-    private fun createMainInterceptor(cookieJar: SecureCookieJar?) = okhttp3.Interceptor { chain ->
+    private fun createMainInterceptor() = okhttp3.Interceptor { chain ->
         val cbConfig = config.circuitBreakerConfig
         val breaker = if (cbConfig.enabled) {
             breakers.getOrPut(chain.request().url.host) {
@@ -164,10 +164,6 @@ class HttpClientBuilder(
             val req = originalRequest.newBuilder().apply {
                 config.headers.forEach { (name, value) -> header(name, value) }
                 config.dynamicHeaders.forEach { (name, provider) -> header(name, provider()) }
-
-                cookieJar?.loadForRequest(originalRequest.url)?.takeIf { it.isNotEmpty() }?.let { cookies ->
-                    header("Cookie", cookies.joinToString("; ") { "${it.name}=${it.value}" })
-                }
             }.build()
 
             try {
@@ -188,13 +184,6 @@ class HttpClientBuilder(
                 // Record one outcome per call: a 5xx returned to the caller is a
                 // server failure, anything else means the host is responding.
                 if (resp.code >= 500) breaker?.recordFailure() else breaker?.recordSuccess()
-
-                cookieJar?.let { jar ->
-                    resp.headers("Set-Cookie")
-                        .mapNotNull { Cookie.parse(req.url, it) }
-                        .takeIf { it.isNotEmpty() }
-                        ?.let { jar.saveFromResponse(req.url, it) }
-                }
 
                 return@Interceptor req.tag(ProgressListener::class.java)?.let { listener ->
                     resp.body?.let { body ->

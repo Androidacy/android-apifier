@@ -15,10 +15,9 @@
  */
 package com.androidacy.apifier.security
 
+import android.net.Uri
 import android.util.Base64
-import okhttp3.Cookie
-import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrl
+import com.androidacy.apifier.http.Cookie
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -65,7 +64,7 @@ class SecureCookieJarTest {
         .expiresAt(expiresAt)
         .build()
 
-    private fun url(spec: String): HttpUrl = spec.toHttpUrl()
+    private fun url(spec: String): Uri = Uri.parse(spec)
 
     @Test
     fun roundTripReturnsSavedCookies() {
@@ -196,5 +195,70 @@ class SecureCookieJarTest {
         val raw = Base64.decode(stored, Base64.NO_WRAP)
 
         assertEquals(1, raw[0].toInt())
+    }
+
+    @Test
+    fun persistedSchemaFieldNamesPinned() {
+        val future = System.currentTimeMillis() + 60_000L
+        val cookie = cookie("session", "A", domain = "example.com", expiresAt = future)
+        val target = url("https://example.com/")
+
+        jar.saveFromResponse(target, listOf(cookie))
+
+        val stored = storage.getStringSet("cookies_example.com", null)!!.single()
+        val json = decryptWithJarKey(stored)
+
+        assertEquals(setOf("n", "v", "d", "p", "e", "s", "h", "ho"), json.keys().asSequence().toSet())
+    }
+
+    @Test
+    fun legacyFramingStillDecodes() {
+        val secretKey = SecureCookieJar::class.java.getDeclaredField("secretKey")
+            .apply { isAccessible = true }.get(jar) as javax.crypto.SecretKey
+
+        val plaintext = org.json.JSONObject().apply {
+            put("n", "session")
+            put("v", "A")
+            put("d", "example.com")
+            put("p", "/")
+            put("e", System.currentTimeMillis() + 60_000L)
+            put("s", false)
+            put("h", false)
+            put("ho", true)
+        }.toString().toByteArray(Charsets.UTF_8)
+
+        val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, secretKey)
+        val iv = cipher.iv
+        val ciphertext = cipher.doFinal(plaintext)
+
+        // Legacy framing predates the version byte: [ivLen][iv][ciphertext].
+        val legacy = ByteArray(1 + iv.size + ciphertext.size)
+        legacy[0] = iv.size.toByte()
+        System.arraycopy(iv, 0, legacy, 1, iv.size)
+        System.arraycopy(ciphertext, 0, legacy, 1 + iv.size, ciphertext.size)
+
+        storage.putStringSet("_cookie_domains", setOf("example.com"))
+        storage.putStringSet("cookies_example.com", setOf(Base64.encodeToString(legacy, Base64.NO_WRAP)))
+
+        val loaded = jar.loadForRequest(url("https://example.com/"))
+
+        assertTrue(loaded.any { it.name == "session" && it.value == "A" })
+    }
+
+    /** Decrypts [encoded] under the jar's current-version framing, for schema-pin assertions. */
+    private fun decryptWithJarKey(encoded: String): org.json.JSONObject {
+        val secretKey = SecureCookieJar::class.java.getDeclaredField("secretKey")
+            .apply { isAccessible = true }.get(jar) as javax.crypto.SecretKey
+        val raw = Base64.decode(encoded, Base64.NO_WRAP)
+        val ivLen = raw[1].toInt() and 0xFF
+        val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            javax.crypto.Cipher.DECRYPT_MODE,
+            secretKey,
+            javax.crypto.spec.GCMParameterSpec(128, raw.copyOfRange(2, 2 + ivLen)),
+        )
+        val plaintext = cipher.doFinal(raw.copyOfRange(2 + ivLen, raw.size))
+        return org.json.JSONObject(String(plaintext, Charsets.UTF_8))
     }
 }

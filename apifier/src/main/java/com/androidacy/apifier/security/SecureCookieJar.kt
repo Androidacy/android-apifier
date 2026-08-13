@@ -16,14 +16,14 @@
 package com.androidacy.apifier.security
 
 import android.annotation.SuppressLint
+import android.net.Uri
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.util.Log
-import okhttp3.Cookie
-import okhttp3.CookieJar
-import okhttp3.HttpUrl
+import com.androidacy.apifier.http.Cookie
+import com.androidacy.apifier.http.CookieJar
 import org.json.JSONObject
 import java.security.KeyStore
 import java.util.concurrent.ConcurrentHashMap
@@ -49,7 +49,7 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
     private val decodedCache = ConcurrentHashMap<String, List<Cookie>>()
     private val lock = ReentrantReadWriteLock()
 
-    override fun loadForRequest(url: HttpUrl): List<Cookie> = lock.read {
+    override fun loadForRequest(uri: Uri): List<Cookie> = lock.read {
         val now = System.currentTimeMillis()
         val result = mutableListOf<Cookie>()
 
@@ -63,14 +63,14 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
 
             for (cookie in cookies) {
                 if (cookie.expiresAt <= now) continue
-                if (!cookie.matches(url)) continue
+                if (!cookie.matches(uri)) continue
                 result.add(cookie)
             }
         }
         result
     }
 
-    override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) = lock.write {
+    override fun saveFromResponse(uri: Uri, cookies: List<Cookie>) = lock.write {
         if (cookies.isEmpty()) return@write
 
         val now = System.currentTimeMillis()
