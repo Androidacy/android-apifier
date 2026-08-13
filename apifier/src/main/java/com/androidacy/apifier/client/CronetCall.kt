@@ -21,7 +21,6 @@ import android.util.Log
 import com.androidacy.apifier.http.ApifierException
 import com.androidacy.apifier.http.Call
 import com.androidacy.apifier.http.Callback
-import com.androidacy.apifier.http.ErrorCode
 import com.androidacy.apifier.http.Headers
 import com.androidacy.apifier.http.MediaType.Companion.toMediaTypeOrNull
 import com.androidacy.apifier.http.Request
@@ -180,15 +179,7 @@ internal class CronetCall(
             }
             if (refusal != null) {
                 req.cancel()
-                failCall(
-                    ApifierException.Transport(
-                        errorCode = ErrorCode.OTHER,
-                        cronetErrorCode = 0,
-                        immediatelyRetryable = false,
-                        message = refusal,
-                        cause = null
-                    )
-                )
+                failCall(ApifierException.RedirectRefused(refusal))
                 return
             }
 

@@ -42,7 +42,7 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
 
     // Write-through cache of decoded cookies keyed by domain. The hot request path
     // (loadForRequest, once per request) would otherwise re-decrypt every cookie of
-    // every domain — a Keystore binder IPC each. Reads take the shared read lock so
+    // every domain, a Keystore binder IPC each. Reads take the shared read lock so
     // concurrent requests no longer serialize; writes (saveFromResponse) take the
     // write lock and refresh the affected domain, so the consumer's CookieStorage is
     // never touched by a read and a write at the same time.
@@ -99,7 +99,7 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
             }
         }
 
-        // Update domain index — prune domains whose storage was cleared
+        // Update domain index: prune domains whose storage was cleared
         val allDomains = getStoredDomains().toMutableSet()
         for (domain in domainsChanged) {
             if (storage.getStringSet(domainKey(domain), null).isNullOrEmpty()) {
@@ -195,7 +195,7 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
                 gcmDecrypt(key, raw.copyOfRange(1, 1 + ivLen), raw.copyOfRange(1 + ivLen, raw.size))
             }
         } catch (_: Exception) {
-            // Bad Base64, failed GCM authentication, or unusable key — reject.
+            // Bad Base64, failed GCM authentication, or unusable key: reject.
             null
         }
     }
@@ -244,7 +244,7 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
                 Log.d(TAG, "Cookie encryption key stored in StrongBox")
             }
         } catch (e: Exception) {
-            // StrongBoxUnavailableException or unsupported algorithm — fall through
+            // StrongBoxUnavailableException or unsupported algorithm: fall through
             Log.d(TAG, "StrongBox unavailable, falling back to TEE/software: ${e.message}")
             null
         }

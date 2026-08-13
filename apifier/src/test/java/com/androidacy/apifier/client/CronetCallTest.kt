@@ -26,6 +26,7 @@ import org.chromium.net.NetworkException
 import org.chromium.net.UrlRequest
 import org.chromium.net.UrlResponseInfo
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -53,7 +54,9 @@ class CronetCallTest {
         assertEquals(20, harness.urlRequest.followed)
         assertEquals(1, harness.urlRequest.canceled)
         assertEquals(1, harness.callback.failures.size)
-        assertTrue(harness.callback.failures[0].message!!.contains("Too many redirects"))
+        val refusal = harness.callback.failures[0] as ApifierException.RedirectRefused
+        assertTrue(refusal.reason.contains("Too many redirects"))
+        assertFalse(refusal.retryable)
     }
 
     @Test
@@ -66,7 +69,9 @@ class CronetCallTest {
         assertEquals(0, harness.urlRequest.followed)
         assertEquals(1, harness.urlRequest.canceled)
         assertEquals(1, harness.callback.failures.size)
-        assertTrue(harness.callback.failures[0].message!!.contains("non-HTTPS"))
+        val refusal = harness.callback.failures[0] as ApifierException.RedirectRefused
+        assertEquals(ErrorCode.REDIRECT_REFUSED, refusal.errorCode)
+        assertFalse(refusal.retryable)
     }
 
     @Test

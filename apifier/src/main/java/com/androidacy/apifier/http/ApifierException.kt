@@ -35,7 +35,8 @@ enum class ErrorCode {
     CIRCUIT_OPEN,
     CANCELLED,
     CALL_TIMEOUT,
-    DNS_UNTRUSTED
+    DNS_UNTRUSTED,
+    REDIRECT_REFUSED
 }
 
 /**
@@ -71,6 +72,14 @@ sealed class ApifierException(message: String, cause: Throwable? = null) : IOExc
     /** The call exceeded its apifier-enforced timeout of [timeoutMillis] ms. */
     class CallTimeout(val timeoutMillis: Long) : ApifierException("Call timed out after $timeoutMillis ms") {
         override val errorCode: ErrorCode = ErrorCode.CALL_TIMEOUT
+    }
+
+    /**
+     * The transport declined to follow a redirect, because the chain grew past its limit or the
+     * new location was not https. Terminal: a retry replays a request that was already refused.
+     */
+    class RedirectRefused(val reason: String) : ApifierException(reason) {
+        override val errorCode: ErrorCode = ErrorCode.REDIRECT_REFUSED
     }
 
     /** DoH resolution for [host] returned an untrusted or unverifiable answer. */

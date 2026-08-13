@@ -85,6 +85,10 @@ class ApifierExceptionTest {
         assertFalse(ApifierException.Cancelled().retryable)
         assertFalse(ApifierException.CallTimeout(5_000).retryable)
         assertFalse(ApifierException.DnsUntrusted("example.com").retryable)
+
+        val refused = ApifierException.RedirectRefused("Redirect to non-HTTPS URL rejected")
+        assertFalse(refused.retryable)
+        assertEquals(ErrorCode.REDIRECT_REFUSED, refused.errorCode)
     }
 
     @Test
