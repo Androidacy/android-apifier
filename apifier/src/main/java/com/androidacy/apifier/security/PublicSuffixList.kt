@@ -64,16 +64,22 @@ class PublicSuffixList(rules: Sequence<String>) {
     }
 
     /**
-     * Longest matching public suffix for [labels], most labels first. An exception rule
-     * match overrides a same-length wildcard match and yields its own label minus one
+     * Longest matching public suffix for [labels], most labels first. Exception rules take
+     * priority over every exact and wildcard rule regardless of label count, so they are
+     * scanned to completion first; the winning exception yields its own label minus one
      * (the label the exception carves out). With nothing matching, the last label stands
      * as the public suffix under the implicit universal `*` rule.
      */
     private fun matchedSuffix(labels: List<String>): List<String> {
         for (start in labels.indices) {
             val candidate = labels.subList(start, labels.size)
+            if (candidate.joinToString(".") in exception) {
+                return candidate.subList(1, candidate.size)
+            }
+        }
+        for (start in labels.indices) {
+            val candidate = labels.subList(start, labels.size)
             val suffix = candidate.joinToString(".")
-            if (suffix in exception) return candidate.subList(1, candidate.size)
             if (suffix in exact) return candidate
             if (candidate.size >= 2 && candidate.subList(1, candidate.size).joinToString(".") in wildcard) {
                 return candidate
@@ -82,10 +88,18 @@ class PublicSuffixList(rules: Sequence<String>) {
         return labels.subList(labels.size - 1, labels.size)
     }
 
+    /**
+     * IDN.toASCII preserves a trailing root dot instead of rejecting it, which would leave
+     * an empty final label that matches no rule and lets the implicit-star fallback treat
+     * the trailing-dot form as its own public suffix. Trim it first and re-validate so
+     * "example.com." normalizes identically to "example.com".
+     */
     private fun normalize(domain: String): String? {
-        if (domain.isEmpty() || isIpLiteral(domain)) return null
+        val lower = domain.lowercase()
+        val trimmed = if (lower.endsWith(".")) lower.substring(0, lower.length - 1) else lower
+        if (trimmed.isEmpty() || trimmed.endsWith(".") || isIpLiteral(trimmed)) return null
         return try {
-            IDN.toASCII(domain.lowercase())
+            IDN.toASCII(trimmed)
         } catch (e: IllegalArgumentException) {
             null
         }

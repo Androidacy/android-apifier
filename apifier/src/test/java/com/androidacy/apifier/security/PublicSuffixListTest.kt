@@ -53,6 +53,16 @@ class PublicSuffixListTest {
     }
 
     @Test
+    fun exceptionBeatsLongerRule() {
+        // "a.b.ck" (3 labels) matches longer than "!b.ck" (2 labels); the exception must
+        // still win, not the longer exact rule.
+        val psl = PublicSuffixList(sequenceOf("a.b.ck", "!b.ck"))
+
+        assertFalse(psl.isPublicSuffix("a.b.ck"))
+        assertEquals("b.ck", psl.effectiveTldPlusOne("a.b.ck"))
+    }
+
+    @Test
     fun unknownTldUsesImplicitStar() {
         val psl = PublicSuffixList(sequenceOf("com"))
 
@@ -86,6 +96,22 @@ class PublicSuffixListTest {
         assertNull(psl.effectiveTldPlusOne("1.2.3.4"))
         assertFalse(psl.isPublicSuffix("[::1]"))
         assertNull(psl.effectiveTldPlusOne("[::1]"))
+    }
+
+    @Test
+    fun trailingDotNormalizedAwaySameAsDotless() {
+        val psl = PublicSuffixList(sequenceOf("com"))
+
+        assertNull(psl.effectiveTldPlusOne("com."))
+        assertEquals("example.com", psl.effectiveTldPlusOne("example.com."))
+    }
+
+    @Test
+    fun ipLiteralWithTrailingDotStillRejected() {
+        val psl = PublicSuffixList(sequenceOf("4"))
+
+        assertFalse(psl.isPublicSuffix("1.2.3.4."))
+        assertNull(psl.effectiveTldPlusOne("1.2.3.4."))
     }
 
     @Test
