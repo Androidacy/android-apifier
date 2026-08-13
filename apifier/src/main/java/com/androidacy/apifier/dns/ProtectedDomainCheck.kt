@@ -23,6 +23,7 @@ import java.net.InetAddress
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.Condition
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -54,6 +55,8 @@ class ProtectedDomainCheck(
     private val backoff = ExponentialBackoff(
         BackoffConfig(maxAttempts = Int.MAX_VALUE, baseDelayMs = 5_000, maxDelayMs = 300_000)
     )
+
+    private val generation = AtomicInteger(0)
 
     @Volatile private var enforce = true
     @Volatile private var stopped = false
@@ -95,6 +98,7 @@ class ProtectedDomainCheck(
 
     /** Drops every verdict and recomputes, since a new network invalidates what the old one proved. */
     fun onNetworkChanged() {
+        generation.incrementAndGet()
         states.forEach { (host, state) ->
             state.lock.withLock {
                 state.status = TrustStatus.UNKNOWN
@@ -143,12 +147,17 @@ class ProtectedDomainCheck(
     private fun submit(host: String) {
         val state = states[host] ?: return
         if (stopped || !state.running.compareAndSet(false, true)) return
+        val submittedAt = generation.get()
         executor.execute {
-            try {
-                publish(state, evaluate(host))
+            val verdict = try {
+                evaluate(host)
             } finally {
                 state.running.set(false)
             }
+            // A verdict from before a network change describes queries issued on the old network.
+            // Publishing it would overwrite the reset with a stale answer, and a stale OK stands
+            // until the next network change because nothing reschedules an OK.
+            if (submittedAt == generation.get()) publish(state, verdict) else submit(host)
         }
     }
 

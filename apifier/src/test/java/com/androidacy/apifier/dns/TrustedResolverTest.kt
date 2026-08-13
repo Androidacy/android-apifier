@@ -106,7 +106,16 @@ class TrustedResolverTest {
     }
 
     @Test
-    fun certificatePresentedFlagIsClearedBetweenQueries() {
+    fun postHandshakeStallIsResolverUnavailable() {
+        val server = stallingTlsServer("dns/test_leaf_covering_localhost.p12")
+
+        assertThrows(ResolverUnavailableException::class.java) {
+            resolverFor(server.port).query("cloudflare.com")
+        }
+    }
+
+    @Test
+    fun rejectionFlagIsClearedBetweenQueries() {
         val rejecting = tlsServer("dns/test_selfsigned.p12", "200 OK")
         assertThrows(CertificateRejectedException::class.java) {
             resolverFor(rejecting.port).query("cloudflare.com")
@@ -150,28 +159,39 @@ class TrustedResolverTest {
     private fun resource(path: String) =
         checkNotNull(javaClass.classLoader?.getResourceAsStream(path)) { "missing fixture $path" }
 
-    private fun tlsServer(keystore: String, status: String): TlsServer {
+    private fun tlsServer(keystore: String, status: String): TlsServer =
+        TlsServer(tlsServerSocket(keystore), Behavior.RESPOND, status, dnsResponse)
+            .also { closeables += it }
+
+    private fun stallingTlsServer(keystore: String): TlsServer =
+        TlsServer(tlsServerSocket(keystore), Behavior.CLOSE_AFTER_HANDSHAKE, "", ByteArray(0))
+            .also { closeables += it }
+
+    private fun abortingServer(): TlsServer =
+        TlsServer(
+            ServerSocket(0, 4, InetAddress.getByName("127.0.0.1")),
+            Behavior.CLOSE_ON_ACCEPT,
+            "",
+            ByteArray(0)
+        ).also { closeables += it }
+
+    private fun tlsServerSocket(keystore: String): ServerSocket {
         val store = KeyStore.getInstance("PKCS12")
         resource(keystore).use { store.load(it, passphrase) }
         val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
         kmf.init(store, passphrase)
         val context = SSLContext.getInstance("TLS")
         context.init(kmf.keyManagers, null, null)
-        return TlsServer(
-            context.serverSocketFactory.createServerSocket(0, 4, InetAddress.getByName("127.0.0.1")),
-            status,
-            dnsResponse
-        ).also { closeables += it }
+        return context.serverSocketFactory
+            .createServerSocket(0, 4, InetAddress.getByName("127.0.0.1"))
     }
 
-    private fun abortingServer(): TlsServer =
-        TlsServer(ServerSocket(0, 4, InetAddress.getByName("127.0.0.1")), null, ByteArray(0))
-            .also { closeables += it }
+    private enum class Behavior { RESPOND, CLOSE_AFTER_HANDSHAKE, CLOSE_ON_ACCEPT }
 
-    /** Serves [body] with [status] to every connection, or closes on accept when [status] is null. */
     private class TlsServer(
         private val server: ServerSocket,
-        private val status: String?,
+        private val behavior: Behavior,
+        private val status: String,
         private val body: ByteArray
     ) : Closeable {
 
@@ -189,7 +209,15 @@ class TrustedResolverTest {
                     return
                 }
                 try {
-                    socket.use { if (status != null) respond(it) }
+                    socket.use {
+                        when (behavior) {
+                            Behavior.RESPOND -> respond(it)
+                            // Reading the request drives the handshake to completion, so the
+                            // client fails only after it has validated the chain.
+                            Behavior.CLOSE_AFTER_HANDSHAKE -> readRequest(it.getInputStream())
+                            Behavior.CLOSE_ON_ACCEPT -> Unit
+                        }
+                    }
                 } catch (_: IOException) {
                     // A rejected handshake surfaces here; keep serving later connections.
                 }
@@ -197,7 +225,19 @@ class TrustedResolverTest {
         }
 
         private fun respond(socket: Socket) {
-            val input = socket.getInputStream()
+            readRequest(socket.getInputStream())
+            val header = "HTTP/1.1 $status\r\n" +
+                "Content-Type: application/dns-message\r\n" +
+                "Content-Length: ${body.size}\r\n" +
+                "Connection: close\r\n\r\n"
+            socket.getOutputStream().apply {
+                write(header.toByteArray(Charsets.US_ASCII))
+                write(body)
+                flush()
+            }
+        }
+
+        private fun readRequest(input: java.io.InputStream) {
             var contentLength = 0
             var line = readLine(input)
             while (line.isNotEmpty()) {
@@ -211,15 +251,6 @@ class TrustedResolverTest {
                 val n = input.read(ByteArray(contentLength - read))
                 if (n < 0) break
                 read += n
-            }
-            val header = "HTTP/1.1 $status\r\n" +
-                "Content-Type: application/dns-message\r\n" +
-                "Content-Length: ${body.size}\r\n" +
-                "Connection: close\r\n\r\n"
-            socket.getOutputStream().apply {
-                write(header.toByteArray(Charsets.US_ASCII))
-                write(body)
-                flush()
             }
         }
 

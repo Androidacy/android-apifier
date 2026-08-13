@@ -82,7 +82,7 @@ open class TrustedResolver(
 
     private fun queryType(hostname: String, type: Int): DnsAnswer {
         val query = DnsWireCodec.buildQuery(hostname, type)
-        trust.certificatePresented.set(false)
+        trust.certificateRejected.set(false)
         val connection = URL(endpoint).openConnection() as HttpsURLConnection
         try {
             connection.sslSocketFactory = trust.socketFactory
@@ -91,9 +91,9 @@ open class TrustedResolver(
             connection.instanceFollowRedirects = false
             connection.setRequestProperty("Content-Type", "application/dns-message")
             connection.setRequestProperty("Accept", "application/dns-message")
-            // A pooled connection the resolver already closed fails at the write with no
-            // handshake of its own, which would be read as a certificate rejection and block
-            // every protected domain. One connection per query keeps that reading honest.
+            // When a pooled socket the resolver already closed fails at the write, the platform
+            // retries transparently on a fresh connection, so one query can carry two handshakes
+            // and the rejection flag would describe the wrong one. One connection per query.
             connection.setRequestProperty("Connection", "close")
             connection.connectTimeout = timeoutMs
             connection.readTimeout = timeoutMs
@@ -116,11 +116,12 @@ open class TrustedResolver(
             throw e
         } catch (e: IOException) {
             // Both cases arrive as SSLHandshakeException or a bare IOException, so the split
-            // comes from what the trust manager recorded, not from the exception type.
-            throw if (trust.certificatePresented.get() == true) {
+            // comes from whether validation rejected the chain or the SAN coverage, not from
+            // the exception type.
+            throw if (trust.certificateRejected.get() == true) {
                 CertificateRejectedException("$name presented a rejected certificate", e)
             } else {
-                ResolverUnavailableException("$name did not complete a connection", e)
+                ResolverUnavailableException("$name connection failed", e)
             }
         } finally {
             connection.disconnect()

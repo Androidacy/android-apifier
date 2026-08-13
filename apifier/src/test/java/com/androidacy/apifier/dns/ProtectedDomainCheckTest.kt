@@ -277,6 +277,26 @@ class ProtectedDomainCheckTest {
     }
 
     @Test
+    fun networkChangeDuringEvaluationDiscardsStaleVerdict() {
+        lateinit var check: ProtectedDomainCheck
+        var changed = false
+        val racing = FakeResolver(trust) {
+            if (!changed) {
+                changed = true
+                check.onNetworkChanged()
+            }
+            DnsAnswer(listOf("1.1.1.1"), 60)
+        }
+        check = checkOver(listOf(racing, answering("1.1.1.1"), answering("1.1.1.1")), listOf("1.1.1.1"))
+
+        check.start()
+        executor.runAll()
+
+        assertEquals(2, racing.queryCount)
+        assertEquals(TrustStatus.OK, check.status(HOST))
+    }
+
+    @Test
     fun unrelatedHostNeverGated() {
         val check = checkOver(
             listOf(answering("8.8.8.8"), answering("8.8.8.8"), answering("8.8.8.8")),

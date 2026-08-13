@@ -20,6 +20,7 @@ import com.androidacy.apifier.R
 import java.io.ByteArrayInputStream
 import java.net.InetAddress
 import java.security.KeyStore
+import java.security.cert.CertificateException
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import javax.net.ssl.HostnameVerifier
@@ -40,20 +41,23 @@ import javax.net.ssl.X509TrustManager
 class PinnedRootTrust(roots: List<X509Certificate>) {
 
     /**
-     * True once the current thread has entered certificate validation for the connection it is
-     * driving. It separates a resolver that presented a certificate we rejected from one that
-     * never completed a connection, which the exception type alone cannot distinguish. Queries
-     * run concurrently on a shared executor and each connection holds one thread for its
-     * lifetime, so the flag is per thread rather than per instance.
+     * True once the current thread has rejected a certificate for the connection it is driving,
+     * either at chain validation or at SAN coverage. It separates interception from a connection
+     * that simply failed, which the exception type alone cannot distinguish. A handshake that
+     * succeeds leaves it false, so a socket failure later in the same query stays a connection
+     * failure. Queries run concurrently on a shared executor and each connection holds one
+     * thread for its lifetime, so the flag is per thread rather than per instance.
      */
-    val certificatePresented: ThreadLocal<Boolean> = ThreadLocal.withInitial { false }
+    val certificateRejected: ThreadLocal<Boolean> = ThreadLocal.withInitial { false }
 
     val trustManager: X509TrustManager
 
     val socketFactory: SSLSocketFactory
 
     /** Matches the dialed IP literal against the leaf's `iPAddress` SAN entries. */
-    val hostnameVerifier: HostnameVerifier = HostnameVerifier { host, session -> coversAddress(host, session) }
+    val hostnameVerifier: HostnameVerifier = HostnameVerifier { host, session ->
+        coversAddress(host, session).also { covered -> if (!covered) certificateRejected.set(true) }
+    }
 
     init {
         require(roots.isNotEmpty()) { "PinnedRootTrust requires at least one root certificate" }
@@ -66,7 +70,7 @@ class PinnedRootTrust(roots: List<X509Certificate>) {
         val delegate = factory.trustManagers.filterIsInstance<X509TrustManager>().firstOrNull()
             ?: throw IllegalStateException("No X509TrustManager for the pinned resolver roots")
 
-        trustManager = RecordingTrustManager(delegate, certificatePresented)
+        trustManager = RecordingTrustManager(delegate, certificateRejected)
         socketFactory = SSLContext.getInstance("TLS")
             .apply { init(null, arrayOf(trustManager), null) }
             .socketFactory
@@ -87,12 +91,16 @@ class PinnedRootTrust(roots: List<X509Certificate>) {
 
     private class RecordingTrustManager(
         private val delegate: X509TrustManager,
-        private val presented: ThreadLocal<Boolean>
+        private val rejected: ThreadLocal<Boolean>
     ) : X509TrustManager by delegate {
 
         override fun checkServerTrusted(chain: Array<out X509Certificate>, authType: String) {
-            presented.set(true)
-            delegate.checkServerTrusted(chain, authType)
+            try {
+                delegate.checkServerTrusted(chain, authType)
+            } catch (e: CertificateException) {
+                rejected.set(true)
+                throw e
+            }
         }
     }
 
