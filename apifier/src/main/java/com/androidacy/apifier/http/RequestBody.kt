@@ -16,7 +16,9 @@
 package com.androidacy.apifier.http
 
 import java.io.File
+import okio.Buffer
 import okio.BufferedSink
+import okio.Source
 import okio.source
 
 /**
@@ -33,6 +35,17 @@ abstract class RequestBody {
     open fun contentLength(): Long = -1L
 
     abstract fun writeTo(sink: BufferedSink)
+
+    /**
+     * A fresh, pull-based view of this body's bytes, read incrementally by the upload provider
+     * instead of all at once. Called again on every rewind, so an override that owns a resource
+     * (a file handle, a part's own source) must reopen it here rather than reuse a spent one.
+     *
+     * The default buffers the whole [writeTo] output once, the same memory shape a body without
+     * a pull-friendly source had before this seam existed; bodies whose bytes are already
+     * resident or file-backed override this to avoid that copy.
+     */
+    internal open fun pullSource(): Source = Buffer().also { writeTo(it) }
 
     companion object {
         /** Encodes with the charset of [contentType], or UTF-8 when it names none. */
@@ -55,6 +68,8 @@ abstract class RequestBody {
                 override fun writeTo(sink: BufferedSink) {
                     sink.write(bytes)
                 }
+
+                override fun pullSource(): Source = ByteArraySource(bytes)
             }
         }
 
@@ -70,7 +85,26 @@ abstract class RequestBody {
                 override fun writeTo(sink: BufferedSink) {
                     file.source().use { sink.writeAll(it) }
                 }
+
+                override fun pullSource(): Source = file.source()
             }
         }
     }
+}
+
+/** Streams an already-resident array without copying it into a [Buffer] up front. */
+private class ByteArraySource(private val bytes: ByteArray) : Source {
+    private var offset = 0
+
+    override fun read(sink: Buffer, byteCount: Long): Long {
+        if (offset >= bytes.size) return -1L
+        val toRead = minOf(byteCount, (bytes.size - offset).toLong()).toInt()
+        sink.write(bytes, offset, toRead)
+        offset += toRead
+        return toRead.toLong()
+    }
+
+    override fun timeout(): okio.Timeout = okio.Timeout.NONE
+
+    override fun close() = Unit
 }

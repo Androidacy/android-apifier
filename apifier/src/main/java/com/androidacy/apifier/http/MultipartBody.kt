@@ -20,6 +20,8 @@ import com.androidacy.apifier.http.RequestBody.Companion.toRequestBody
 import java.util.UUID
 import okio.Buffer
 import okio.BufferedSink
+import okio.Source
+import okio.Timeout
 
 /**
  * A `multipart/form-data` request body.
@@ -45,6 +47,33 @@ class MultipartBody private constructor(
 
     override fun writeTo(sink: BufferedSink) {
         writeOrCount(sink)
+    }
+
+    /**
+     * Frame headers and trailers are tiny generated buffers; only part bodies can be large, so
+     * they stream from their own [pullSource][RequestBody.pullSource] instead of being written
+     * into a shared sink up front.
+     */
+    override fun pullSource(): Source {
+        val sources = mutableListOf<Source>()
+        for (part in parts) {
+            sources += Buffer().apply {
+                writeUtf8("--").writeUtf8(boundary).writeUtf8(CRLF)
+                writeUtf8("Content-Disposition: form-data; name=")
+                writeQuoted(this, part.name)
+                if (part.filename != null) {
+                    writeUtf8("; filename=")
+                    writeQuoted(this, part.filename)
+                }
+                writeUtf8(CRLF)
+                part.body.contentType()?.let { writeUtf8("Content-Type: ").writeUtf8(it.toString()).writeUtf8(CRLF) }
+                writeUtf8(CRLF)
+            }
+            sources += part.body.pullSource()
+            sources += Buffer().writeUtf8(CRLF)
+        }
+        sources += Buffer().writeUtf8("--").writeUtf8(boundary).writeUtf8("--").writeUtf8(CRLF)
+        return SequencedSource(sources)
     }
 
     private fun writeOrCount(sink: BufferedSink?): Long {
@@ -130,5 +159,29 @@ class MultipartBody private constructor(
 
         @JvmField
         val FORM: MediaType = checkNotNull("multipart/form-data".toMediaTypeOrNull())
+    }
+}
+
+/** Reads [sources] one after another, closing each as it is exhausted. */
+private class SequencedSource(private val sources: List<Source>) : Source {
+    private var index = 0
+
+    override fun read(sink: Buffer, byteCount: Long): Long {
+        while (index < sources.size) {
+            val read = sources[index].read(sink, byteCount)
+            if (read != -1L) return read
+            sources[index].close()
+            index++
+        }
+        return -1L
+    }
+
+    override fun timeout(): Timeout = Timeout.NONE
+
+    override fun close() {
+        while (index < sources.size) {
+            sources[index].close()
+            index++
+        }
     }
 }

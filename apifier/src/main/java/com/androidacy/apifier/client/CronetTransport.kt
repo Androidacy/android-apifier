@@ -19,14 +19,9 @@ import android.net.Uri
 import com.androidacy.apifier.http.Call
 import com.androidacy.apifier.http.Headers
 import com.androidacy.apifier.http.Request
-import com.androidacy.apifier.http.RequestBody
 import com.androidacy.apifier.progress.ProgressListener
-import okio.Buffer
 import org.chromium.net.CronetEngine
-import org.chromium.net.UploadDataProvider
-import org.chromium.net.UploadDataSink
 import org.chromium.net.UrlRequest
-import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
@@ -76,8 +71,12 @@ class CronetTransport(
             if (!hasContentType) {
                 body.contentType()?.let { addHeader("Content-Type", it.toString()) }
             }
+            val progressListener = request.tag(ProgressListener::class.java)
             setUploadDataProvider(
-                BufferedUploadProvider(body, request.tag(ProgressListener::class.java), bytesSent),
+                StreamingUploadProvider(body) { sent, total ->
+                    bytesSent.set(sent)
+                    progressListener?.update(sent, total, total in 0..sent)
+                },
                 executor
             )
         }
@@ -96,40 +95,4 @@ internal interface TransportListener {
     fun onResponseStarted(ttfbMillis: Long)
 
     fun onTransferComplete(bytesSent: Long, bytesReceived: Long)
-}
-
-/**
- * Feeds a [RequestBody] to Cronet.
- *
- * The body is buffered into memory once, so a large upload is held whole. Progress counts bytes
- * handed to the transport's send buffer rather than on-wire acknowledgements.
- */
-private class BufferedUploadProvider(
-    private val body: RequestBody,
-    private val progressListener: ProgressListener?,
-    private val bytesSent: AtomicLong
-) : UploadDataProvider() {
-
-    private val data by lazy { Buffer().also { body.writeTo(it) }.readByteArray() }
-    private var offset = 0
-
-    override fun getLength(): Long = data.size.toLong()
-
-    override fun read(uploadDataSink: UploadDataSink, byteBuffer: ByteBuffer) {
-        val toWrite = minOf(data.size - offset, byteBuffer.remaining())
-        if (toWrite > 0) {
-            byteBuffer.put(data, offset, toWrite)
-            offset += toWrite
-            bytesSent.addAndGet(toWrite.toLong())
-        }
-        progressListener?.update(offset.toLong(), data.size.toLong(), offset >= data.size)
-        uploadDataSink.onReadSucceeded(false)
-    }
-
-    override fun rewind(uploadDataSink: UploadDataSink) {
-        offset = 0
-        bytesSent.set(0)
-        progressListener?.update(0, data.size.toLong(), false)
-        uploadDataSink.onRewindSucceeded()
-    }
 }
