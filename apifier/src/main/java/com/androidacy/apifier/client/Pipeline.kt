@@ -40,6 +40,7 @@ import okio.buffer
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -149,26 +150,35 @@ internal class Pipeline(
             TimeUnit.MILLISECONDS
         )
 
-        return try {
+        val response = try {
             gateTrust(host, deadlineAt)
             val breaker = breakers.forHost(host)
             if (breaker != null && !breaker.checkState()) throw ApifierException.CircuitOpen(host)
             attempts(request, options, call, breaker, timeoutMs, deadlineAt)
-        } finally {
+        } catch (e: Throwable) {
             timeoutTask.cancel(false)
+            throw e
         }
+
+        // The response is handed over when its headers arrive and its body is still streaming,
+        // so the budget has to outlive this return; the body disarms it on close or at EOF.
+        return response.newBuilder()
+            .body(BudgetedBody(response.body, call, timeoutTask, timeoutMs))
+            .build()
     }
 
     /**
      * Runs once per call and ahead of the breaker, so a host refused here never records a failure
      * against a server that did nothing wrong. The wait is capped well under the call budget
      * because a missing verdict never blocks anyway.
+     *
+     * [ProtectedDomainCheck.shouldBlock] already answers false when enforcement is off, so it
+     * is always consulted here; only the wait is worth skipping.
      */
     private fun gateTrust(host: String, deadlineAt: Long) {
         val check = trustCheck ?: return
-        if (!check.enforcing) return
         val budget = (deadlineAt - System.currentTimeMillis()).coerceAtMost(TRUST_VERDICT_WAIT_MS)
-        if (budget > 0) check.awaitVerdict(host, budget)
+        if (check.enforcing && budget > 0) check.awaitVerdict(host, budget)
         if (check.shouldBlock(host)) throw ApifierException.DnsUntrusted(host)
     }
 
@@ -200,6 +210,12 @@ internal class Pipeline(
                     backoffSleep(backoff.calculateDelay(attempt), call, timeoutMs)
                     attempt++
                     continue
+                }
+                // A timeout that landed while this response was in hand outranks it, and the
+                // body it carries would fail on first read anyway.
+                if (call.isTimedOut || call.isCanceled) {
+                    response.close()
+                    surrenderIfDone(call, timeoutMs)
                 }
                 if (response.code >= 500) breaker?.recordFailure() else breaker?.recordSuccess()
                 return withProgress(prepared, response)
@@ -239,6 +255,7 @@ internal class Pipeline(
     }
 
     private fun attachCookies(request: Request, builder: Request.Builder) {
+        if (request.header("Cookie") != null) return
         val cookies = cookieJar?.loadForRequest(request.uri).orEmpty()
         if (cookies.isEmpty()) return
         builder.header("Cookie", cookies.joinToString("; ") { "${it.name}=${it.value}" })
@@ -286,7 +303,8 @@ internal class Pipeline(
             transportCall.cancel()
             throw ApifierException.CallTimeout(timeoutMs)
         }
-        call.inFlight = null
+        // inFlight stays set: the body is still streaming through this call, so a cancel after
+        // the headers arrive has to reach it.
 
         failure.get()?.let { throw it }
         val response = checkNotNull(result.get())
@@ -307,9 +325,13 @@ internal class Pipeline(
         return response.newBuilder().body(ProgressBody(response.body, listener)).build()
     }
 
-    /** A cancelled or timed-out call is our own abort, not a verdict on the host. */
+    /**
+     * A caller's cancel is our own abort and says nothing about the host. A timeout is the
+     * opposite: a host that burned the whole budget without answering is what a breaker is for,
+     * and it reaches here already cancelled because the timeout task cancels the transport.
+     */
     private fun recordTerminalFailure(breaker: CircuitBreaker?, call: PipelineCall) {
-        if (call.isCanceled || call.isTimedOut) return
+        if (call.isCanceled && !call.isTimedOut) return
         breaker?.recordFailure()
     }
 
@@ -323,7 +345,9 @@ internal class Pipeline(
                 Thread.sleep(slice)
             } catch (e: InterruptedException) {
                 Thread.currentThread().interrupt()
-                // An interrupted worker thread ends this call, and nothing else can act on it.
+                // An interrupted worker thread ends this call. Recording it on the call keeps a
+                // pool shutdown from charging every in-flight host with a failure.
+                call.cancel()
                 throw ApifierException.Cancelled()
             }
             remaining -= slice
@@ -345,6 +369,51 @@ internal class Pipeline(
         const val BACKOFF_SLICE_MS = 50L
         const val TRUST_VERDICT_WAIT_MS = 2_000L
         const val TERMINAL_CALLBACK_GRACE_MS = 250L
+    }
+}
+
+/**
+ * Holds the call budget open while [body] streams, and disarms it once the transfer ends.
+ *
+ * The timeout task cancels the transport, which surfaces on this side as a cancellation, so
+ * a read that fails after the deadline is retold as the timeout it really was.
+ */
+private class BudgetedBody(
+    private val body: ResponseBody,
+    private val call: PipelineCall,
+    private val timeoutTask: ScheduledFuture<*>,
+    private val timeoutMillis: Long
+) : ResponseBody() {
+
+    private var bounded: BufferedSource? = null
+
+    override fun contentType(): MediaType? = body.contentType()
+
+    override fun contentLength(): Long = body.contentLength()
+
+    override fun source(): BufferedSource =
+        bounded ?: bounding(body.source()).buffer().also { bounded = it }
+
+    override fun close() {
+        disarm()
+        body.close()
+    }
+
+    private fun disarm() {
+        timeoutTask.cancel(false)
+    }
+
+    private fun bounding(source: Source): Source = object : ForwardingSource(source) {
+        override fun read(sink: Buffer, byteCount: Long): Long {
+            val bytesRead = try {
+                super.read(sink, byteCount)
+            } catch (e: IOException) {
+                disarm()
+                throw if (call.isTimedOut) ApifierException.CallTimeout(timeoutMillis) else e
+            }
+            if (bytesRead == -1L) disarm()
+            return bytesRead
+        }
     }
 }
 

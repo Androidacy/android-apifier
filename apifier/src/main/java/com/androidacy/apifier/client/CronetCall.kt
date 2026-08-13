@@ -95,6 +95,17 @@ internal class CronetCall(
 
     private var redirectCount = 0
 
+    /**
+     * Host the request's `Cookie` header was built for, or null when it carries none.
+     *
+     * Cronet follows redirects inside one request and re-sends the caller's extra headers on
+     * every hop, and Chromium's redirect header update (`net/url_request/redirect_util.cc`)
+     * rewrites `Origin` and the `Content-*` set but leaves `Cookie` alone. Nothing else in this
+     * path is host-aware, so without this the session would follow a hop to any https host.
+     */
+    private val cookieScopeHost: String? =
+        if (request.header("Cookie") == null) null else request.uri.host?.lowercase()
+
     override fun request(): Request = request
 
     override fun enqueue(callback: Callback) {
@@ -197,6 +208,9 @@ internal class CronetCall(
                 redirectCount > MAX_REDIRECTS -> "Too many redirects ($MAX_REDIRECTS)"
                 !newLocationUrl.startsWith("https://", ignoreCase = true) ->
                     "Redirect to non-HTTPS URL rejected: $newLocationUrl"
+                cookieScopeHost != null &&
+                    Uri.parse(newLocationUrl).host?.lowercase() != cookieScopeHost ->
+                    "Redirect to another host rejected while carrying cookies: $newLocationUrl"
                 else -> null
             }
             if (refusal != null) {

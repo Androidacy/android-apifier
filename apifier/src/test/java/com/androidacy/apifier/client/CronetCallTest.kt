@@ -78,6 +78,43 @@ class CronetCallTest {
     }
 
     @Test
+    fun crossHostRedirectRefusedWhileCarryingCookies() {
+        val harness = Harness(requestHeaders = listOf("Cookie" to "sid=1"))
+        harness.enqueue()
+
+        harness.cronetCallback.onRedirectReceived(harness.urlRequest, info(), "https://other.example.net/x")
+
+        assertEquals(0, harness.urlRequest.followed)
+        assertEquals(1, harness.urlRequest.canceled)
+        val refusal = harness.callback.failures.single() as ApifierException.RedirectRefused
+        assertTrue(refusal.reason.contains("carrying cookies"))
+        assertFalse(refusal.retryable)
+    }
+
+    @Test
+    fun sameHostRedirectFollowedWhileCarryingCookies() {
+        val harness = Harness(requestHeaders = listOf("Cookie" to "sid=1"))
+        harness.enqueue()
+
+        harness.cronetCallback.onRedirectReceived(harness.urlRequest, info(), "https://example.com/second")
+
+        assertEquals(1, harness.urlRequest.followed)
+        assertEquals(0, harness.urlRequest.canceled)
+        assertEquals(0, harness.callback.failures.size)
+    }
+
+    @Test
+    fun crossHostRedirectFollowedWithoutCookies() {
+        val harness = Harness()
+        harness.enqueue()
+
+        harness.cronetCallback.onRedirectReceived(harness.urlRequest, info(), "https://other.example.net/x")
+
+        assertEquals(1, harness.urlRequest.followed)
+        assertEquals(0, harness.urlRequest.canceled)
+    }
+
+    @Test
     fun redirectListenerSeesHopHeaders() {
         val listener = RecordingListener()
         val harness = Harness(listener = listener)
@@ -325,14 +362,17 @@ class CronetCallTest {
     private class Harness(
         method: String = "GET",
         listener: TransportListener? = null,
-        deliveryExecutor: Executor = Executor { it.run() }
+        deliveryExecutor: Executor = Executor { it.run() },
+        requestHeaders: List<Pair<String, String>> = emptyList()
     ) {
         val urlRequest = FakeUrlRequest()
         val callback = RecordingCallback()
         lateinit var cronetCallback: UrlRequest.Callback
 
         val call = CronetCall(
-            Request.Builder().url("https://example.com/").method(method, null).build(),
+            Request.Builder().url("https://example.com/").method(method, null)
+                .apply { requestHeaders.forEach { (name, value) -> addHeader(name, value) } }
+                .build(),
             5_000L,
             listener,
             deliveryExecutor

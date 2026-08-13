@@ -56,6 +56,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
 @RunWith(RobolectricTestRunner::class)
@@ -133,6 +134,21 @@ class PipelineTest {
         pipeline.execute(request().build(), CallOptions(), PipelineCall()).close()
 
         assertEquals("sid=abc; theme=dark", transport.seen[0].header("Cookie"))
+    }
+
+    @Test
+    fun callerCookieHeaderIsNotReplacedByTheJar() {
+        val jar = RecordingJar(listOf(storedCookie("sid", "fromjar")))
+        val transport = FakeTransport(listOf(step { ok(it) }))
+        val pipeline = pipelineOf(transport, config(), jar = jar)
+
+        pipeline.execute(
+            request().header("Cookie", "sid=mine").build(),
+            CallOptions(),
+            PipelineCall()
+        ).close()
+
+        assertEquals("sid=mine", transport.seen[0].header("Cookie"))
     }
 
     @Test
@@ -291,6 +307,65 @@ class PipelineTest {
         }
 
         assertEquals(2, transport.seen.size)
+        assertTrue("a host that burned the whole budget is a breaker failure", breaker.isOpen)
+    }
+
+    @Test
+    fun callTimeoutBoundsTheResponseBody() {
+        val transport = FakeTransport(listOf(slowBodyStep()))
+        val pipeline = pipelineOf(transport, config())
+
+        val response =
+            pipeline.execute(request().build(), CallOptions(callTimeoutMillis = 300), PipelineCall())
+        val started = System.nanoTime()
+        assertThrows(ApifierException.CallTimeout::class.java) { response.body.bytes() }
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000
+
+        assertTrue("body failed after ${elapsedMs}ms", elapsedMs < 3_000)
+    }
+
+    @Test
+    fun timeoutRacingTheHandoverOutranksTheResponse() {
+        val call = PipelineCall()
+        val transport = FakeTransport(
+            listOf(
+                step {
+                    call.markTimedOut()
+                    ok(it)
+                }
+            )
+        )
+        val pipeline = pipelineOf(transport, config())
+
+        assertThrows(ApifierException.CallTimeout::class.java) {
+            pipeline.execute(request().build(), CallOptions(), call)
+        }
+    }
+
+    @Test
+    fun interruptedBackoffDoesNotBlameTheHost() {
+        val transport = FakeTransport(listOf(step { ok(it, 500) }, step { ok(it) }))
+        val breakers = BreakerRegistry(CircuitBreakerConfig(failureThreshold = 1))
+        val breaker = checkNotNull(breakers.forHost(HOST))
+        val pipeline = pipelineOf(
+            transport,
+            config(retry = RetryConfig(maxAttempts = 2)),
+            breakers = breakers
+        )
+        val outcome = AtomicReference<Throwable?>()
+        val worker = thread(isDaemon = true) {
+            outcome.set(
+                runCatching {
+                    pipeline.execute(request().build(), CallOptions(), PipelineCall()).close()
+                }.exceptionOrNull()
+            )
+        }
+
+        Thread.sleep(200)
+        worker.interrupt()
+        worker.join(5_000)
+
+        assertTrue("got ${outcome.get()}", outcome.get() is ApifierException.Cancelled)
         assertTrue(breaker.isClosed)
     }
 
@@ -329,8 +404,9 @@ class PipelineTest {
         val body = pipeline.execute(request, CallOptions(), PipelineCall()).body.bytes()
 
         assertEquals(payload.size, body.size)
-        val progress = updates.filterNot { it.third }
-        assertEquals(listOf(4L, 8L, 12L), progress.map { it.first })
+        val progress = updates.filterNot { it.third }.map { it.first }
+        assertEquals(listOf(4L, 8L, 12L), progress)
+        assertEquals(progress.distinct(), progress)
         assertEquals(listOf(Triple(12L, 12L, true)), updates.filter { it.third })
     }
 
@@ -388,9 +464,10 @@ class PipelineTest {
     )
 
     private fun step(delayMs: Long = 0, produce: (Request) -> Response) =
-        Step(delayMs) { request, _ -> produce(request) }
+        Step(delayMs) { request, _, _ -> produce(request) }
 
-    private fun hopStep(produce: (Request, TransportListener?) -> Response) = Step(0, produce)
+    private fun hopStep(produce: (Request, TransportListener?) -> Response) =
+        Step(0) { request, listener, _ -> produce(request, listener) }
 
     /** A verdict of FAIL: every trusted resolver disagrees with what the system resolver answered. */
     private fun failingTrustCheck(): ProtectedDomainCheck {
@@ -401,6 +478,21 @@ class PipelineTest {
         val resolvers = List(3) { FakeResolver(trust) }
         return ProtectedDomainCheck(listOf(HOST), resolvers, { listOf("1.1.1.1") }, { it.run() })
             .apply { start() }
+    }
+
+    /** A body that only ends when the transport is cancelled, the way [BodyPipe] behaves. */
+    private fun slowBodyStep() = Step(0) { request, _, cancelSignal ->
+        val source = object : Source {
+            override fun read(sink: Buffer, byteCount: Long): Long {
+                if (cancelSignal.await(10, TimeUnit.SECONDS)) throw ApifierException.Cancelled()
+                return -1
+            }
+
+            override fun timeout(): Timeout = Timeout.NONE
+
+            override fun close() = Unit
+        }
+        ok(request, body = source.buffer().asResponseBody(null, -1L))
     }
 
     private fun chunkedBody(payload: ByteArray, chunk: Int): ResponseBody {
@@ -422,6 +514,7 @@ class PipelineTest {
         return source.buffer().asResponseBody(null, payload.size.toLong())
     }
 
+    /** Disagrees with the scripted system answer, so every verdict is FAIL. */
     private class FakeResolver(trust: PinnedRootTrust) :
         TrustedResolver("fake", "https://127.0.0.1/dns-query", trust) {
         override fun query(hostname: String): DnsAnswer = DnsAnswer(listOf("8.8.8.8"), 60)
@@ -457,7 +550,7 @@ class PipelineTest {
 
     private class Step(
         val delayMs: Long,
-        val produce: (Request, TransportListener?) -> Response
+        val produce: (Request, TransportListener?, CountDownLatch) -> Response
     )
 
     private class FakeTransport(private val steps: List<Step>) {
@@ -494,7 +587,7 @@ class PipelineTest {
                     return@thread
                 }
                 try {
-                    val response = step.produce(request, listener)
+                    val response = step.produce(request, listener, cancelSignal)
                     deliver { callback.onResponse(this, response) }
                 } catch (e: IOException) {
                     deliver { callback.onFailure(this, e) }
