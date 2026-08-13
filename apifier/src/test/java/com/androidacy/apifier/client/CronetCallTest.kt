@@ -34,6 +34,8 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import java.io.IOException
 import java.nio.ByteBuffer
+import java.util.concurrent.Executor
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.AbstractMap
 import com.androidacy.apifier.http.Call as ApifierCall
 
@@ -204,6 +206,39 @@ class CronetCallTest {
     }
 
     @Test
+    fun bodyChunksApplyBackpressureAndAreNotBuffered() {
+        val harness = Harness()
+        harness.enqueue()
+        harness.cronetCallback.onResponseStarted(harness.urlRequest, info())
+        val body = harness.callback.responses.single().body
+
+        val chunkSize = 32 * 1024
+        val chunks = 40
+        val accepted = AtomicInteger()
+        val pusher = Thread {
+            repeat(chunks) {
+                harness.readCompleted(ByteArray(chunkSize))
+                accepted.incrementAndGet()
+            }
+        }.apply { isDaemon = true; start() }
+
+        Thread.sleep(300)
+        val stalled = accepted.get()
+        val reads = harness.urlRequest.reads
+
+        assertTrue("accepted $stalled of $chunks chunks with nobody draining", stalled < chunks)
+        // One read is armed per accepted chunk, plus the one that followed the headers. The
+        // engine is never let run ahead of the reader, so nothing accumulates off-pipe.
+        assertEquals(stalled + 1, reads)
+
+        val drained = body.source().readByteArray(chunkSize.toLong() * chunks)
+        pusher.join(10_000)
+
+        assertEquals(chunkSize * chunks, drained.size)
+        assertEquals(chunks, accepted.get())
+    }
+
+    @Test
     fun executeBridgesAsyncResult() {
         val harness = Harness()
         harness.urlRequest.onStart = {
@@ -262,7 +297,8 @@ class CronetCallTest {
         val call = CronetCall(
             Request.Builder().url("https://example.com/").method(method, null).build(),
             5_000L,
-            listener
+            listener,
+            Executor { it.run() }
         ) { cronetCallback, _ ->
             this.cronetCallback = cronetCallback
             urlRequest
@@ -270,8 +306,9 @@ class CronetCallTest {
 
         fun enqueue() = call.enqueue(callback)
 
-        fun readCompleted(text: String) {
-            val bytes = text.toByteArray()
+        fun readCompleted(text: String) = readCompleted(text.toByteArray())
+
+        fun readCompleted(bytes: ByteArray) {
             val buffer = ByteBuffer.allocateDirect(32 * 1024)
             buffer.put(bytes)
             cronetCallback.onReadCompleted(urlRequest, info(), buffer)
@@ -282,6 +319,7 @@ class CronetCallTest {
         var started = 0
         var canceled = 0
         var followed = 0
+        @Volatile var reads = 0
         var onStart: (() -> Unit)? = null
 
         override fun start() {
@@ -293,7 +331,9 @@ class CronetCallTest {
             followed++
         }
 
-        override fun read(buffer: ByteBuffer) = Unit
+        override fun read(buffer: ByteBuffer) {
+            reads++
+        }
 
         override fun cancel() {
             canceled++

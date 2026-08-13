@@ -51,7 +51,7 @@ class CronetTransport(
     override fun newCall(request: Request): Call = newCall(request, null)
 
     internal fun newCall(request: Request, listener: TransportListener?): Call =
-        CronetCall(request, readTimeoutMs, listener) { callback, bytesSent ->
+        CronetCall(request, readTimeoutMs, listener, executor) { callback, bytesSent ->
             buildUrlRequest(request, callback, bytesSent)
         }
 

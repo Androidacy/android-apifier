@@ -33,9 +33,11 @@ import okio.buffer
 import org.chromium.net.CronetException
 import org.chromium.net.UrlRequest
 import org.chromium.net.UrlResponseInfo
+import org.chromium.net.apihelpers.ImplicitFlowControlCallback
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -56,17 +58,21 @@ internal fun interface UrlRequestFactory {
  * The callback delivery and the body stream are separate: [Callback] fires as soon as the
  * headers arrive, and the body flows through a [BodyPipe] afterwards, so a failure partway
  * through the body reaches the reader rather than the callback.
+ *
+ * [deliveryExecutor] must not be the thread that drives the engine callbacks. The base callback
+ * arms the next read only after `onResponseStarted` returns, so a consumer that drains the body
+ * inside `onResponse` would wait for bytes that cannot arrive until it yields.
  */
 internal class CronetCall(
     private val request: Request,
     readTimeoutMs: Long,
     private val listener: TransportListener?,
+    private val deliveryExecutor: Executor,
     private val urlRequestFactory: UrlRequestFactory
 ) : Call {
 
     private companion object {
         const val TAG = "CronetCall"
-        const val READ_BUFFER_SIZE = 32 * 1024
         const val MAX_REDIRECTS = 20
     }
 
@@ -145,12 +151,16 @@ internal class CronetCall(
 
     private fun deliverResponse(response: Response) {
         val target = callback ?: return
-        if (delivered.compareAndSet(false, true)) target.onResponse(this, response)
+        if (delivered.compareAndSet(false, true)) {
+            deliveryExecutor.execute { target.onResponse(this, response) }
+        }
     }
 
     private fun deliverFailure(e: IOException) {
         val target = callback ?: return
-        if (delivered.compareAndSet(false, true)) target.onFailure(this, e)
+        if (delivered.compareAndSet(false, true)) {
+            deliveryExecutor.execute { target.onFailure(this, e) }
+        }
     }
 
     /** Records [e] on the body channel and delivers it when no response was handed over yet. */
@@ -167,9 +177,9 @@ internal class CronetCall(
         }
     }
 
-    private val cronetCallback = object : UrlRequest.Callback() {
+    private val cronetCallback = object : ImplicitFlowControlCallback() {
 
-        override fun onRedirectReceived(req: UrlRequest, info: UrlResponseInfo, newLocationUrl: String) {
+        override fun shouldFollowRedirect(info: UrlResponseInfo, newLocationUrl: String): Boolean {
             redirectCount++
             val refusal = when {
                 redirectCount > MAX_REDIRECTS -> "Too many redirects ($MAX_REDIRECTS)"
@@ -178,19 +188,20 @@ internal class CronetCall(
                 else -> null
             }
             if (refusal != null) {
-                req.cancel()
+                // Returning false cancels the request, which is the only teardown the base
+                // callback performs; the reason has to be recorded here or it is lost.
                 failCall(ApifierException.RedirectRefused(refusal))
-                return
+                return false
             }
 
             listener?.onRedirect(
                 Uri.parse(info.url),
                 Headers.of(info.allHeadersAsList.map { it.key to it.value })
             )
-            req.followRedirect()
+            return true
         }
 
-        override fun onResponseStarted(req: UrlRequest, info: UrlResponseInfo) {
+        override fun onResponseStarted(info: UrlResponseInfo) {
             listener?.onResponseStarted((System.nanoTime() - startNanos) / 1_000_000)
 
             val assembled = ResponseAssembly.assemble(
@@ -207,10 +218,6 @@ internal class CronetCall(
                 bodyPipe.source.buffer().asResponseBody(contentType, assembled.contentLength)
             }
 
-            // Cronet only advances a request through read() or cancel(). A bodyless response
-            // still needs the read so the engine reaches its terminal state.
-            req.read(ByteBuffer.allocateDirect(READ_BUFFER_SIZE))
-
             deliverResponse(
                 Response.Builder()
                     .request(request)
@@ -223,33 +230,30 @@ internal class CronetCall(
             )
         }
 
-        override fun onReadCompleted(req: UrlRequest, info: UrlResponseInfo, byteBuffer: ByteBuffer) {
-            byteBuffer.flip()
+        override fun onBodyChunkRead(info: UrlResponseInfo, byteBuffer: ByteBuffer) {
             bytesReceived.addAndGet(byteBuffer.remaining().toLong())
             try {
                 transferBuffer.write(byteBuffer)
                 bodyPipe.write(transferBuffer, transferBuffer.size)
-            } catch (_: Exception) {
-                // The consumer closed or canceled the pipe. Without the cancel the request would
-                // stay paused for the engine's lifetime, leaking the connection and the upload
-                // provider.
-                req.cancel()
-                return
+            } catch (e: Exception) {
+                // The consumer closed or canceled the pipe. Cancelling releases the connection
+                // and the upload provider; rethrowing stops the base callback from arming
+                // another read against a request that is going away.
+                urlRequest.get()?.cancel()
+                throw e
             }
-            byteBuffer.clear()
-            req.read(byteBuffer)
         }
 
-        override fun onSucceeded(req: UrlRequest, info: UrlResponseInfo) {
+        override fun onSucceeded(info: UrlResponseInfo) {
             bodyPipe.closeSink()
             reportTransfer()
         }
 
-        override fun onFailed(req: UrlRequest, info: UrlResponseInfo, error: CronetException) {
+        override fun onFailed(info: UrlResponseInfo?, error: CronetException) {
             failCall(error.toApifierException())
         }
 
-        override fun onCanceled(req: UrlRequest, info: UrlResponseInfo) {
+        override fun onCanceled(info: UrlResponseInfo?) {
             bodyPipe.closeSink()
             reportTransfer()
         }
