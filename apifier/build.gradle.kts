@@ -59,6 +59,9 @@ dependencies {
     // OkHttp
     api("com.squareup.okhttp3:okhttp:5.4.0")
 
+    // Okio, used directly by the com.androidacy.apifier.http types and not only through OkHttp
+    api("com.squareup.okio:okio:3.17.0")
+
     // Cronet
     api("com.google.android.gms:play-services-cronet:18.1.1")
     api("org.chromium.net:cronet:500.0.1")
