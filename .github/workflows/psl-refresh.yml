@@ -1,0 +1,44 @@
+name: Refresh public suffix list
+
+on:
+  schedule:
+    - cron: '0 6 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - name: Refresh list
+        run: ./scripts/refresh-psl.sh
+
+      - id: diff
+        run: |
+          if git diff --quiet -- apifier/src/main/res/raw/public_suffix_list.dat; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="psl-refresh-$(date -u +%Y-%m-%d)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add apifier/src/main/res/raw/public_suffix_list.dat
+          git commit -s -m "chore(security): refresh bundled public suffix list"
+          git push origin "$branch"
+          gh pr create \
+            --title "chore(security): refresh bundled public suffix list" \
+            --body "Automated refresh from https://publicsuffix.org/list/public_suffix_list.dat." \
+            --base main \
+            --head "$branch"

@@ -43,6 +43,10 @@ android {
             withSourcesJar()
         }
     }
+
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
 }
 
 dependencies {
