@@ -37,16 +37,14 @@ import okhttp3.OkHttpClient
 import org.chromium.net.CronetEngine
 import org.chromium.net.CronetProvider
 import org.chromium.net.DnsOptions
-import org.chromium.net.ExperimentalCronetEngine
 import org.chromium.net.QuicOptions
-import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
-/** Assembles an [OkHttpClient] with Cronet transport, DoH, retries, and cookie support. */
+/** Assembles an [OkHttpClient] with Cronet transport, retries, and cookie support. */
 class HttpClientBuilder(
     private val context: Context,
     private val config: NetworkConfig
@@ -80,14 +78,8 @@ class HttpClientBuilder(
         }
     }
 
-    /**
-     * True once [build] has installed DoH-resolved HostResolverRules into the engine.
-     * False means DoH produced nothing and the engine fell back to system DNS — e.g.
-     * construction happened on the main thread (blocking I/O skipped) or the network
-     * was unavailable. Read-only to consumers.
-     */
-    var dohActive: Boolean = false
-        private set
+    @Deprecated("DoH resolution removed; deleted in 3.0.0 config cleanup")
+    val dohActive: Boolean = false
 
     /**
      * Provider selection outcome in ladder order. Keys are `name:version`, or the bare name
@@ -100,32 +92,10 @@ class HttpClientBuilder(
 
     fun build(): OkHttpClient {
         if (Looper.getMainLooper().isCurrentThread) {
-            Log.d(TAG, "Constructed on the main thread; DoH/provider I/O may be skipped")
+            Log.d(TAG, "Constructed on the main thread; provider I/O may be skipped")
         }
 
-        val dohConfig = config.cronetConfig.dohConfig
-        val resolver = if (dohConfig.enabled) DohResolver(dohConfig) else null
-
-        // Resolve configured domains via DoH before building the engine so
-        // HostResolverRules are baked in from the start. Parallelized internally.
-        @Suppress("DEPRECATION")
-        val domains = (dohConfig.dohDomains + dohConfig.preResolveDomains).distinct()
-        if (resolver != null && domains.isNotEmpty()) {
-            resolver.preResolve(domains)
-            // Happy Eyeballs: race IPv6 vs IPv4 per domain to pick the best
-            // reachable address. HostResolverRules only accept a single IP and
-            // bypass Cronet's own Happy Eyeballs, so we must do our own.
-            resolver.raceResolvedAddresses()
-        }
-
-        val engine = buildEngine(resolver)
-
-        // Warn whenever DoH was expected to produce host rules but did not — for any
-        // reason (network down, all providers failed, main-thread I/O skipped). The
-        // client still works via system DNS, but callers relying on DoH should know.
-        if (resolver != null && domains.isNotEmpty() && !dohActive) {
-            Log.w(TAG, "DoH resolution produced no host rules; falling back to system DNS")
-        }
+        val engine = buildEngine()
 
         val builder = OkHttpClient.Builder().apply {
             connectTimeout(config.timeouts.connect.inWholeMilliseconds, TimeUnit.MILLISECONDS)
@@ -333,7 +303,7 @@ class HttpClientBuilder(
     }
 
     @Suppress("UnsafeOptInUsageError", "DEPRECATION")
-    private fun buildEngine(resolver: DohResolver?): CronetEngine {
+    private fun buildEngine(): CronetEngine {
         val report = LinkedHashMap<String, String>()
         val provider = selectProvider(report)
         providerReport = report
@@ -376,35 +346,6 @@ class HttpClientBuilder(
             enablePublicKeyPinningBypassForLocalTrustAnchors(false)
         }
 
-        // Bake pre-resolved HostResolverRules into the engine
-        val hostRules = resolver?.buildHostResolverRules()
-        dohActive = hostRules != null
-        if (hostRules != null) {
-            val experimentalJson = JSONObject().apply {
-                put("HostResolverRules", JSONObject().put("host_resolver_rules", hostRules))
-                put("AsyncDNS", JSONObject().put("enable", true))
-            }.toString()
-            applyExperimentalOptions(builder, experimentalJson)
-        }
-
         return builder.build()
-    }
-
-    private fun applyExperimentalOptions(builder: CronetEngine.Builder, json: String) {
-        if (builder is ExperimentalCronetEngine.Builder) {
-            builder.setExperimentalOptions(json)
-            return
-        }
-
-        // Reflection fallback for provider-wrapped builders
-        try {
-            val delegateField = builder.javaClass.getDeclaredField("mBuilderDelegate")
-            delegateField.isAccessible = true
-            val delegate = delegateField.get(builder)
-            val setMethod = delegate.javaClass.getMethod("setExperimentalOptions", String::class.java)
-            setMethod.invoke(delegate, json)
-        } catch (e: Exception) {
-            Log.w(TAG, "Could not set experimental options (HostResolverRules): ${e.message}")
-        }
     }
 }

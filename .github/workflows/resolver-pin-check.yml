@@ -1,0 +1,32 @@
+name: Resolver pin check
+
+# A rejected certificate now produces a FAIL verdict for every protected domain, so a resolver
+# rotating to an unpinned root would block traffic until an app update ships. Fail loudly.
+
+on:
+  schedule:
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+jobs:
+  verify-pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - name: Verify each resolver still anchors at a pinned root
+        run: |
+          set -u
+          bundle=apifier/src/main/res/raw/apifier_resolver_roots.pem
+          status=0
+          for address in 1.1.1.1 8.8.8.8 94.140.14.140; do
+            chain=$(openssl s_client -connect "$address:443" -CAfile "$bundle" -no-CApath -no-CAstore </dev/null 2>/dev/null)
+            if printf '%s' "$chain" | grep -q 'Verify return code: 0 (ok)'; then
+              echo "ok: $address anchors at a pinned root"
+            else
+              echo "FAIL: $address no longer anchors at a root in $bundle"
+              printf '%s' "$chain" | grep -E 'Verify return code|^ *[0-9] [si]:' || true
+              status=1
+            fi
+          done
+          exit $status
