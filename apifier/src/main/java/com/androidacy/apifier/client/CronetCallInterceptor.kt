@@ -17,6 +17,7 @@ package com.androidacy.apifier.client
 
 import android.os.Looper
 import android.util.Log
+import com.androidacy.apifier.http.Protocol as ApifierProtocol
 import com.androidacy.apifier.progress.ProgressListener
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -25,7 +26,6 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.asResponseBody
 import okio.Buffer
 import okio.ForwardingSource
-import okio.Pipe
 import okio.buffer
 import org.chromium.net.CronetEngine
 import org.chromium.net.CronetException
@@ -53,9 +53,7 @@ class CronetCallInterceptor(
     companion object {
         private const val TAG = "CronetCallInterceptor"
         private const val READ_BUFFER_SIZE = 32 * 1024
-        private const val PIPE_BUFFER_SIZE = 256L * 1024
         private const val MAX_REDIRECTS = 20
-        private val ENCODINGS_HANDLED_BY_CRONET = setOf("br", "deflate", "gzip", "x-gzip", "zstd")
     }
 
     override fun intercept(chain: Interceptor.Chain): Response {
@@ -71,8 +69,16 @@ class CronetCallInterceptor(
         // thread (including at end-of-stream, after the headers latch is released),
         // so visibility must not rely on the latch alone.
         val callbackError = AtomicReference<IOException?>()
-        val pipe = Pipe(PIPE_BUFFER_SIZE)
+        // The abort hook needs the request, which cannot exist before the callback that
+        // builds it.
+        val urlRequestRef = AtomicReference<UrlRequest?>()
+        val bodyPipe = BodyPipe(readTimeoutMillis) { urlRequestRef.get()?.cancel() }
         val transferBuffer = Buffer()
+
+        fun failRequest(e: IOException) {
+            callbackError.set(e)
+            bodyPipe.fail(e)
+        }
 
         var redirectCount = 0
 
@@ -85,13 +91,13 @@ class CronetCallInterceptor(
                 redirectCount++
                 if (redirectCount > MAX_REDIRECTS) {
                     req.cancel()
-                    callbackError.set(IOException("Too many redirects ($MAX_REDIRECTS)"))
+                    failRequest(IOException("Too many redirects ($MAX_REDIRECTS)"))
                     headersLatch.countDown()
                     return
                 }
                 if (!newLocationUrl.startsWith("https://", ignoreCase = true)) {
                     req.cancel()
-                    callbackError.set(IOException("Redirect to non-HTTPS URL rejected: $newLocationUrl"))
+                    failRequest(IOException("Redirect to non-HTTPS URL rejected: $newLocationUrl"))
                     headersLatch.countDown()
                     return
                 }
@@ -112,8 +118,7 @@ class CronetCallInterceptor(
                 byteBuffer.flip()
                 try {
                     transferBuffer.write(byteBuffer)
-                    pipe.sink.write(transferBuffer, transferBuffer.size)
-                    pipe.sink.flush()
+                    bodyPipe.write(transferBuffer, transferBuffer.size)
                 } catch (_: Exception) {
                     // The consumer closed (or canceled) the pipe. Cronet only
                     // advances a request via read()/cancel(), so without this the
@@ -131,7 +136,7 @@ class CronetCallInterceptor(
                     responseInfo = info
                     headersLatch.countDown()
                 }
-                try { pipe.sink.close() } catch (_: Exception) {}
+                bodyPipe.closeSink()
             }
 
             override fun onFailed(
@@ -139,9 +144,9 @@ class CronetCallInterceptor(
                 info: UrlResponseInfo,
                 error: CronetException
             ) {
-                callbackError.set(IOException("Cronet request failed", error))
+                failRequest(IOException("Cronet request failed", error))
                 headersLatch.countDown()
-                try { pipe.sink.close() } catch (_: Exception) {}
+                bodyPipe.closeSink()
             }
         }
 
@@ -164,6 +169,7 @@ class CronetCallInterceptor(
             }
         }.build()
 
+        urlRequestRef.set(urlRequest)
         urlRequest.start()
 
         val call = chain.call()
@@ -177,87 +183,49 @@ class CronetCallInterceptor(
         callbackError.get()?.let { throw it }
         val info = responseInfo ?: throw IOException("No response received from Cronet")
 
-        // Cronet natively decodes certain encodings. When it does, the original
-        // Content-Encoding and Content-Length headers are no longer accurate.
-        val contentEncodings = (info.allHeaders["Content-Encoding"] ?: emptyList())
-            .flatMap { it.split(",").map(String::trim).filter(String::isNotEmpty) }
-        val cronetDecodedBody = contentEncodings.isNotEmpty() &&
-            ENCODINGS_HANDLED_BY_CRONET.containsAll(contentEncodings)
-
-        val contentType = info.allHeaders["Content-Type"]?.lastOrNull()
-        val contentLength = if (cronetDecodedBody || request.method == "HEAD") {
-            -1L
-        } else {
-            info.allHeaders["Content-Length"]?.lastOrNull()?.toLongOrNull() ?: -1L
-        }
+        val assembled = ResponseAssembly.assemble(
+            headers = info.allHeadersAsList.map { it.key to it.value },
+            statusCode = info.httpStatusCode,
+            negotiatedProtocol = info.negotiatedProtocol,
+            method = request.method
+        )
+        val contentType = assembled.contentType?.toMediaTypeOrNull()
 
         val body = if (request.method == "HEAD") {
-            try { pipe.sink.close() } catch (_: Exception) {}
-            Buffer().asResponseBody(contentType?.toMediaTypeOrNull(), 0)
+            bodyPipe.closeSink()
+            Buffer().asResponseBody(contentType, 0)
         } else {
-            // The body is a Pipe with no timeout, and this application interceptor
-            // never returns through chain.proceed(), so OkHttp's read/write timeouts
-            // and callTimeout do not reach the body path. Bound both ends ourselves:
-            // a stalled read (server sends headers then hangs) or a stalled sink (an
-            // abandoned body that never gets drained) unblocks after readTimeoutMillis.
-            pipe.source.timeout().timeout(readTimeoutMillis, TimeUnit.MILLISECONDS)
-            pipe.sink.timeout().timeout(readTimeoutMillis, TimeUnit.MILLISECONDS)
-            val source = object : ForwardingSource(pipe.source) {
+            val source = object : ForwardingSource(bodyPipe.source) {
                 override fun read(sink: Buffer, byteCount: Long): Long {
                     if (call.isCanceled()) {
                         urlRequest.cancel()
                         throw IOException("Canceled")
                     }
-                    val bytesRead = try {
-                        super.read(sink, byteCount)
-                    } catch (e: IOException) {
-                        // Read deadline elapsed or the pipe was canceled: tear down
-                        // the Cronet request so it is not left running.
-                        urlRequest.cancel()
-                        throw e
-                    }
-                    if (bytesRead == -1L) {
-                        // Okio's Pipe has no error channel: a mid-body Cronet failure
-                        // closes the sink, which reaches the reader as a clean EOF. Raise
-                        // the recorded error so the caller sees the failure instead of a
-                        // silently truncated body.
-                        callbackError.get()?.let { throw it }
-                    }
-                    return bytesRead
-                }
-
-                override fun close() {
-                    // An early close (e.g. the 5xx retry path closing the body) must
-                    // cancel the request, otherwise it stalls as above. Cancelling an
-                    // already-completed request is a no-op.
-                    urlRequest.cancel()
-                    super.close()
+                    return super.read(sink, byteCount)
                 }
             }
-            source.buffer().asResponseBody(contentType?.toMediaTypeOrNull(), contentLength)
+            source.buffer().asResponseBody(contentType, assembled.contentLength)
         }
 
         val responseBuilder = Response.Builder()
             .request(request)
             .code(info.httpStatusCode)
             .message(info.httpStatusText)
-            .protocol(convertProtocol(info.negotiatedProtocol))
+            .protocol(convertProtocol(assembled.protocol))
             .body(body)
 
-        for ((name, value) in info.allHeadersAsList) {
-            if (cronetDecodedBody && name.equals("Content-Encoding", ignoreCase = true)) continue
-            if (cronetDecodedBody && name.equals("Content-Length", ignoreCase = true)) continue
+        for ((name, value) in assembled.headers) {
             responseBuilder.addHeader(name, value)
         }
 
         return responseBuilder.build()
     }
 
-    private fun convertProtocol(negotiatedProtocol: String): Protocol = when {
-        negotiatedProtocol.contains("h3") || negotiatedProtocol.contains("quic") -> Protocol.QUIC
-        negotiatedProtocol.contains("h2") || negotiatedProtocol.contains("spdy") -> Protocol.HTTP_2
-        negotiatedProtocol.contains("http/1.1") -> Protocol.HTTP_1_1
-        else -> Protocol.HTTP_1_0
+    private fun convertProtocol(protocol: ApifierProtocol): Protocol = when (protocol) {
+        ApifierProtocol.QUIC -> Protocol.QUIC
+        ApifierProtocol.HTTP_2 -> Protocol.HTTP_2
+        ApifierProtocol.HTTP_1_1 -> Protocol.HTTP_1_1
+        ApifierProtocol.HTTP_1_0 -> Protocol.HTTP_1_0
     }
 
     /**
