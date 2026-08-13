@@ -46,7 +46,7 @@ class Cookie private constructor(
         val host = uri.host?.lowercase() ?: return false
         val hostMatches = if (hostOnly) host == domain else domainMatches(host, domain)
         if (!hostMatches) return false
-        return pathMatches(uri.path ?: "/", path)
+        return pathMatches(uri.path?.takeIf { it.startsWith("/") } ?: "/", path)
     }
 
     class Builder {
@@ -166,12 +166,19 @@ class Cookie private constructor(
                 var d = domainAttr.trim()
                 if (d.startsWith(".")) d = d.substring(1)
                 d = try { IDN.toASCII(d.lowercase()) } catch (e: IllegalArgumentException) { return null }
-                if (d.isEmpty() || !domainMatches(requestHost, d)) return null
-                if (psl.isPublicSuffix(d)) {
+                if (d.isEmpty()) return null
+                // RFC 6265 s5.3 step 5: an IP-literal request host accepts only an identical
+                // Domain attribute, never a dotted-suffix match against its own octets.
+                hostOnly = if (isIpLiteral(requestHost)) {
                     if (d != requestHost) return null
-                    hostOnly = true
+                    true
+                } else if (!domainMatches(requestHost, d)) {
+                    return null
+                } else if (psl.isPublicSuffix(d)) {
+                    if (d != requestHost) return null
+                    true
                 } else {
-                    hostOnly = false
+                    false
                 }
                 cookieDomain = d
             }
@@ -195,6 +202,13 @@ class Cookie private constructor(
             if (!path.startsWith("/")) return "/"
             val lastSlash = path.lastIndexOf('/')
             return if (lastSlash <= 0) "/" else path.substring(0, lastSlash)
+        }
+
+        /** True for a dotted-quad IPv4 literal or any host containing a `:` (bracketed IPv6). */
+        private fun isIpLiteral(host: String): Boolean {
+            if (host.contains(":")) return true
+            val labels = host.split(".")
+            return labels.all { it.isNotEmpty() && it.all(Char::isDigit) }
         }
 
         /** RFC 6265 s5.1.3: exact match, or [domain] is a suffix of [host] on a label boundary. */

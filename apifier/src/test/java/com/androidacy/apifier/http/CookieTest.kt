@@ -119,6 +119,25 @@ class CookieTest {
         assertFalse(cookie.matches(Uri.parse("https://example.com/administrator")))
     }
 
+    @Test
+    fun rootPathCookieMatchesUrlWithNoPath() {
+        val cookie = Cookie.Builder().name("sid").value("a").hostOnlyDomain("example.com").path("/").build()
+
+        // Uri.getPath() returns "", not null, when the URL has no path segment.
+        assertTrue(cookie.matches(Uri.parse("https://example.com")))
+        assertTrue(cookie.matches(Uri.parse("https://example.com?q=1")))
+    }
+
+    @Test
+    fun ipLiteralRequestHostRejectsSuffixDomain() {
+        val suffixDomain = Cookie.parse(Uri.parse("https://192.168.1.1/"), "sid=a; Domain=168.1.1", psl)
+        assertNull(suffixDomain)
+
+        val exactDomain = Cookie.parse(Uri.parse("https://192.168.1.1/"), "sid=a; Domain=192.168.1.1", psl)!!
+        assertTrue(exactDomain.hostOnly)
+        assertEquals("192.168.1.1", exactDomain.domain)
+    }
+
     private fun yearOf(epochMillis: Long): Int {
         val calendar = Calendar.getInstance(TimeZone.getTimeZone("GMT"))
         calendar.timeInMillis = epochMillis
