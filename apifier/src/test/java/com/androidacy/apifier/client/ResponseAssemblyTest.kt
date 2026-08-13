@@ -98,6 +98,30 @@ class ResponseAssemblyTest {
     }
 
     @Test
+    fun bodylessStatusesIgnoreContentLength() {
+        for (status in listOf(204, 304)) {
+            val assembled = ResponseAssembly.assemble(
+                headers = listOf("Content-Length" to "500"),
+                statusCode = status,
+                negotiatedProtocol = "h2",
+                method = "GET"
+            )
+
+            assertTrue("status $status", assembled.bodyless)
+            assertEquals("status $status", -1L, assembled.contentLength)
+        }
+
+        val ok = ResponseAssembly.assemble(
+            headers = listOf("Content-Length" to "500"),
+            statusCode = 200,
+            negotiatedProtocol = "h2",
+            method = "GET"
+        )
+        assertFalse(ok.bodyless)
+        assertEquals(500L, ok.contentLength)
+    }
+
+    @Test
     fun protocolMappingMatchesNegotiatedString() {
         val cases = mapOf(
             "h3" to Protocol.QUIC,

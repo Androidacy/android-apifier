@@ -20,37 +20,21 @@ package com.androidacy.apifier.client
 import android.content.Context
 import android.os.Looper
 import android.util.Log
-import com.androidacy.apifier.patterns.BackoffConfig
-import com.androidacy.apifier.patterns.CircuitBreaker
-import com.androidacy.apifier.patterns.ExponentialBackoff
-import com.androidacy.apifier.progress.ProgressListener
-import com.androidacy.apifier.progress.ProgressResponseBody
 import com.google.android.gms.net.CronetProviderInstaller
 import com.google.android.gms.tasks.Tasks
-import okhttp3.Call
-import okhttp3.ConnectionPool
-import okhttp3.ConnectionSpec
-import okhttp3.Dispatcher
-import okhttp3.OkHttpClient
 import org.chromium.net.CronetEngine
 import org.chromium.net.CronetProvider
 import org.chromium.net.DnsOptions
 import org.chromium.net.QuicOptions
 import java.io.IOException
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
 
-/** Assembles an [OkHttpClient] with Cronet transport and retries. */
+/** Selects a Cronet provider and builds the engine the transport runs on. */
 class HttpClientBuilder(
     private val context: Context,
     private val config: NetworkConfig
 ) {
     companion object {
         private const val TAG = "HttpClientBuilder"
-        private val IDEMPOTENT_METHODS = setOf("GET", "HEAD")
-        private const val BACKOFF_SLICE_MS = 50L
 
         const val PROVIDER_IN_USE = "IN_USE"
         const val PROVIDER_TOO_OLD = "TOO_OLD"
@@ -86,149 +70,11 @@ class HttpClientBuilder(
     var providerReport: Map<String, String> = emptyMap()
         private set
 
-    private val breakers = ConcurrentHashMap<String, CircuitBreaker>()
-
-    fun build(): OkHttpClient {
+    fun build(): CronetEngine {
         if (Looper.getMainLooper().isCurrentThread) {
             Log.d(TAG, "Constructed on the main thread; provider I/O may be skipped")
         }
-
-        val engine = buildEngine()
-
-        val builder = OkHttpClient.Builder().apply {
-            connectTimeout(config.timeouts.connect.inWholeMilliseconds, TimeUnit.MILLISECONDS)
-            readTimeout(config.timeouts.read.inWholeMilliseconds, TimeUnit.MILLISECONDS)
-            writeTimeout(config.timeouts.write.inWholeMilliseconds, TimeUnit.MILLISECONDS)
-            callTimeout(config.timeouts.call.inWholeMilliseconds, TimeUnit.MILLISECONDS)
-            fastFallback(true)
-            connectionSpecs(listOf(ConnectionSpec.MODERN_TLS))
-            dispatcher(createDispatcher())
-            connectionPool(createConnectionPool())
-        }
-
-        // config.cookieStorage is unused here: SecureCookieJar now speaks apifier's Cookie/Uri,
-        // not okhttp3's, so persistence is inert until T9 rebuilds it as a pipeline stage.
-        // A boundary conversion here would just get deleted when that stage lands.
-        builder.addInterceptor(createMainInterceptor())
-
-        builder.addInterceptor(CronetCallInterceptor(engine, config.timeouts.read.inWholeMilliseconds))
-
-        return builder.build()
-    }
-
-    private fun createDispatcher(): Dispatcher {
-        val numCpus = Runtime.getRuntime().availableProcessors()
-        val threadCount = AtomicInteger(0)
-        val executor = Executors.newFixedThreadPool((numCpus / 2).coerceAtLeast(2)) { runnable ->
-            Thread(runnable, "Http-Worker-${threadCount.incrementAndGet()}").apply {
-                isDaemon = true
-                priority = Thread.NORM_PRIORITY - 1
-            }
-        }
-        return Dispatcher(executor).apply {
-            maxRequests = numCpus * 3
-            maxRequestsPerHost = 3
-        }
-    }
-
-    private fun createConnectionPool() = ConnectionPool(
-        config.connectionPool.maxIdleConnections,
-        config.connectionPool.keepAliveDuration.inWholeMilliseconds,
-        TimeUnit.MILLISECONDS
-    )
-
-    private fun createMainInterceptor() = okhttp3.Interceptor { chain ->
-        val cbConfig = config.circuitBreakerConfig
-        val breaker = if (cbConfig.enabled) {
-            breakers.getOrPut(chain.request().url.host) {
-                CircuitBreaker(cbConfig.failureThreshold, cbConfig.resetTimeoutMs)
-            }
-        } else null
-
-        if (breaker != null && !breaker.checkState()) {
-            throw IOException("Circuit breaker open for ${chain.request().url.host}")
-        }
-
-        var attempt = 0
-        var lastException: IOException? = null
-        // Align the backoff's own attempt ceiling with the retry loop so its -1
-        // "exceeded" sentinel is never reached from inside the loop.
-        val backoff = ExponentialBackoff(BackoffConfig(maxAttempts = config.retryConfig.maxAttempts))
-        val maxAttempts = if (chain.request().tag(NoRetry::class.java) != null) 1
-            else config.retryConfig.maxAttempts
-
-        while (attempt < maxAttempts) {
-            if (chain.call().isCanceled()) throw IOException("Canceled")
-
-            val originalRequest = chain.request()
-            val req = originalRequest.newBuilder().apply {
-                config.headers.forEach { (name, value) -> header(name, value) }
-                config.dynamicHeaders.forEach { (name, provider) -> header(name, provider()) }
-            }.build()
-
-            try {
-                val resp = chain.proceed(req)
-                val isIdempotent = req.method in IDEMPOTENT_METHODS
-
-                if (resp.code >= 500 && attempt < maxAttempts - 1 &&
-                    config.retryConfig.retryOn5xx &&
-                    (!config.retryConfig.retryIdempotentOnly || isIdempotent)
-                ) {
-                    resp.close()
-                    val delayMs = backoff.calculateDelay(attempt)
-                    attempt++
-                    backoffSleep(delayMs, chain.call())
-                    continue
-                }
-
-                // Record one outcome per call: a 5xx returned to the caller is a
-                // server failure, anything else means the host is responding.
-                if (resp.code >= 500) breaker?.recordFailure() else breaker?.recordSuccess()
-
-                return@Interceptor req.tag(ProgressListener::class.java)?.let { listener ->
-                    resp.body?.let { body ->
-                        resp.newBuilder().body(ProgressResponseBody(body, listener)).build()
-                    } ?: resp
-                } ?: resp
-
-            } catch (e: IOException) {
-                lastException = e
-                val isIdempotent = req.method in IDEMPOTENT_METHODS
-                if (attempt < maxAttempts - 1 &&
-                    (!config.retryConfig.retryIdempotentOnly || isIdempotent)
-                ) {
-                    val delayMs = backoff.calculateDelay(attempt)
-                    attempt++
-                    backoffSleep(delayMs, chain.call())
-                    continue
-                }
-                breaker?.recordFailure()
-                throw e
-            }
-        }
-
-        breaker?.recordFailure()
-        throw lastException ?: IOException("Request failed")
-    }
-
-    /**
-     * Sleep for [delayMs], surrendering promptly if the call is canceled. The retry loop
-     * would otherwise burn the full backoff (and every remaining attempt) after cancellation.
-     */
-    private fun backoffSleep(delayMs: Long, call: Call) {
-        if (delayMs <= 0) return
-        var remaining = delayMs
-        while (remaining > 0) {
-            if (call.isCanceled()) throw IOException("Canceled")
-            val slice = remaining.coerceAtMost(BACKOFF_SLICE_MS)
-            try {
-                Thread.sleep(slice)
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
-                throw IOException("Interrupted during retry backoff", e)
-            }
-            remaining -= slice
-        }
+        return buildEngine()
     }
 
     private fun consider(

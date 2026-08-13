@@ -16,15 +16,14 @@
 package com.androidacy.apifier.client
 
 import android.content.Context
+import com.androidacy.apifier.http.Call
+import com.androidacy.apifier.http.Callback
+import com.androidacy.apifier.http.MediaType.Companion.toMediaTypeOrNull
+import com.androidacy.apifier.http.MultipartBody
+import com.androidacy.apifier.http.Request
+import com.androidacy.apifier.http.RequestBody.Companion.asRequestBody
+import com.androidacy.apifier.http.RequestBody.Companion.toRequestBody
 import com.androidacy.apifier.progress.ProgressListener
-import okhttp3.Call
-import okhttp3.Callback
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.MultipartBody
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.asRequestBody
-import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 
 /** Tag marker to skip automatic retries on a per-request basis. */
@@ -34,7 +33,7 @@ object NoRetry
 fun Request.Builder.noRetry(): Request.Builder = tag(NoRetry::class.java, NoRetry)
 
 /**
- * HTTP client backed by OkHttp + Cronet.
+ * HTTP client backed by Cronet.
  * @param context Android context for Cronet provider initialization
  * @param config network and transport configuration
  */
@@ -42,14 +41,16 @@ class ApifierClient(context: Context, config: NetworkConfig) {
 
     private val httpClientBuilder = HttpClientBuilder(context, config)
 
-    /** Configured [OkHttpClient] instance. */
-    val client: OkHttpClient = httpClientBuilder.build()
+    /** Transport the helpers enqueue on, and the entry point for hand-built requests. */
+    val transport: CronetTransport =
+        CronetTransport(httpClientBuilder.build(), config.timeouts.read.inWholeMilliseconds)
 
     /**
      * True when DoH resolution succeeded and Cronet host rules were installed. False means the
-     * client degraded to system DNS — most commonly because it was constructed on the main
+     * client degraded to system DNS, most commonly because it was constructed on the main
      * thread (where the blocking DoH/provider I/O is skipped) or the network was unavailable.
      */
+    @Suppress("DEPRECATION")
     val dohActive: Boolean get() = httpClientBuilder.dohActive
 
     /**
@@ -59,37 +60,22 @@ class ApifierClient(context: Context, config: NetworkConfig) {
     val providerReport: Map<String, String> get() = httpClientBuilder.providerReport
 
     /** Enqueues an async GET. Returns the [Call] for cancellation. */
-    fun get(url: String, callback: Callback): Call {
-        val request = Request.Builder().url(url).get().build()
-        val call = client.newCall(request)
-        call.enqueue(callback)
-        return call
-    }
+    fun get(url: String, callback: Callback): Call =
+        enqueue(Request.Builder().url(url).get().build(), callback)
 
     /** Enqueues an async POST. [contentType] defaults to JSON. Returns the [Call] for cancellation. */
     fun post(url: String, body: String, contentType: String = "application/json", callback: Callback): Call {
         val requestBody = body.toRequestBody(contentType.toMediaTypeOrNull())
-        val request = Request.Builder().url(url).post(requestBody).build()
-        val call = client.newCall(request)
-        call.enqueue(callback)
-        return call
+        return enqueue(Request.Builder().url(url).post(requestBody).build(), callback)
     }
 
     /** Enqueues an async DELETE. Returns the [Call] for cancellation. */
-    fun delete(url: String, callback: Callback): Call {
-        val request = Request.Builder().url(url).delete().build()
-        val call = client.newCall(request)
-        call.enqueue(callback)
-        return call
-    }
+    fun delete(url: String, callback: Callback): Call =
+        enqueue(Request.Builder().url(url).delete().build(), callback)
 
     /** Enqueues an async HEAD. Returns the [Call] for cancellation. */
-    fun head(url: String, callback: Callback): Call {
-        val request = Request.Builder().url(url).head().build()
-        val call = client.newCall(request)
-        call.enqueue(callback)
-        return call
-    }
+    fun head(url: String, callback: Callback): Call =
+        enqueue(Request.Builder().url(url).head().build(), callback)
 
     /** GET with progress tracking via [ProgressListener]. */
     fun download(url: String, progressListener: ProgressListener, callback: Callback): Call {
@@ -98,9 +84,7 @@ class ApifierClient(context: Context, config: NetworkConfig) {
             .tag(ProgressListener::class.java, progressListener)
             .get()
             .build()
-        val call = client.newCall(request)
-        call.enqueue(callback)
-        return call
+        return enqueue(request, callback)
     }
 
     /** Multipart file upload. [fileNames] are form-data field names matching [files] by index. */
@@ -134,10 +118,11 @@ class ApifierClient(context: Context, config: NetworkConfig) {
             requestBuilder.tag(ProgressListener::class.java, progressListener)
         }
 
-        val call = client.newCall(requestBuilder.build())
-        call.enqueue(callback)
-        return call
+        return enqueue(requestBuilder.build(), callback)
     }
+
+    private fun enqueue(request: Request, callback: Callback): Call =
+        transport.newCall(request).also { it.enqueue(callback) }
 
     companion object {
         operator fun invoke(context: Context, block: NetworkConfigBuilder.() -> Unit): ApifierClient {

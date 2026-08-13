@@ -31,7 +31,9 @@ object ResponseAssembly {
         val contentType: String?,
         val contentLength: Long,
         val protocol: Protocol,
-        val bodyDecodedByCronet: Boolean
+        val bodyDecodedByCronet: Boolean,
+        /** RFC 9110: the response carries no payload whatever its headers claim. */
+        val bodyless: Boolean
     )
 
     fun assemble(
@@ -48,7 +50,9 @@ object ResponseAssembly {
         val decoded = contentEncodings.isNotEmpty() &&
             ENCODINGS_HANDLED_BY_CRONET.containsAll(contentEncodings)
 
-        val contentLength = if (decoded || method == "HEAD") {
+        val bodyless = method == "HEAD" || statusCode == 204 || statusCode == 304
+
+        val contentLength = if (decoded || bodyless) {
             -1L
         } else {
             valuesOf(headers, "Content-Length").lastOrNull()?.toLongOrNull() ?: -1L
@@ -68,7 +72,8 @@ object ResponseAssembly {
             contentType = valuesOf(headers, "Content-Type").lastOrNull(),
             contentLength = contentLength,
             protocol = protocolOf(negotiatedProtocol),
-            bodyDecodedByCronet = decoded
+            bodyDecodedByCronet = decoded,
+            bodyless = bodyless
         )
     }
 
