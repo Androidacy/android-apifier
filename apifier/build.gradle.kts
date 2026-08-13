@@ -51,8 +51,8 @@ dependencies {
 
     // Cronet
     api("com.google.android.gms:play-services-cronet:18.1.1")
-    api("org.chromium.net:cronet-api:143.7445.0")
-    implementation("org.chromium.net:cronet-embedded:143.7445.0")
+    api("org.chromium.net:cronet:500.0.1")
+    implementation("org.chromium.net:cronet-bundled:500.0.1")
 
     // Kotlin coroutines
     api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")

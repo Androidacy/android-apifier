@@ -55,6 +55,29 @@ class HttpClientBuilder(
         private const val TAG = "HttpClientBuilder"
         private val IDEMPOTENT_METHODS = setOf("GET", "HEAD")
         private const val BACKOFF_SLICE_MS = 50L
+
+        const val PROVIDER_IN_USE = "IN_USE"
+        const val PROVIDER_TOO_OLD = "TOO_OLD"
+        const val PROVIDER_INELIGIBLE_PLAT = "INELIGIBLE_PLAT"
+        const val PROVIDER_FAILED = "FAILED"
+        const val PROVIDER_NOT_PRESENT = "NOT_PRESENT"
+
+        private const val GMS_PROVIDER_NAME = "Google-Play-Services-Cronet-Provider"
+        private const val JAVA_PROVIDER_CLASS = "org.chromium.net.impl.JavaCronetProvider"
+
+        /** Lightweight freshness guard, not a compatibility floor. */
+        private const val MIN_ENGINE_VERSION = "141.0.7340.3"
+
+        private fun isAtLeast(version: String, minimum: String): Boolean {
+            val actual = version.split('.')
+            val floor = minimum.split('.')
+            for (i in 0 until maxOf(actual.size, floor.size)) {
+                val a = actual.getOrNull(i)?.toIntOrNull() ?: 0
+                val f = floor.getOrNull(i)?.toIntOrNull() ?: 0
+                if (a != f) return a > f
+            }
+            return true
+        }
     }
 
     /**
@@ -64,6 +87,13 @@ class HttpClientBuilder(
      * was unavailable. Read-only to consumers.
      */
     var dohActive: Boolean = false
+        private set
+
+    /**
+     * Provider selection outcome in ladder order. Keys are `name:version`, or the bare name
+     * when the version could not be read. Empty until [build] runs.
+     */
+    var providerReport: Map<String, String> = emptyMap()
         private set
 
     private val breakers = ConcurrentHashMap<String, CircuitBreaker>()
@@ -242,24 +272,71 @@ class HttpClientBuilder(
         }
     }
 
-    @Suppress("UnsafeOptInUsageError", "DEPRECATION")
-    private fun buildEngine(resolver: DohResolver?): CronetEngine {
-        val providers = try {
+    private fun consider(
+        providers: List<CronetProvider>,
+        name: String,
+        absentStatus: String,
+        minVersion: String?,
+        report: MutableMap<String, String>
+    ): CronetProvider? {
+        val provider = providers.firstOrNull { it.name == name }
+        if (provider == null || !provider.isEnabled) {
+            report[name] = absentStatus
+            return null
+        }
+        val version = runCatching { provider.version }.getOrNull()
+        if (version == null) {
+            report[name] = PROVIDER_FAILED
+            return null
+        }
+        val key = "$name:$version"
+        if (minVersion != null && !isAtLeast(version, minVersion)) {
+            report[key] = PROVIDER_TOO_OLD
+            return null
+        }
+        report[key] = PROVIDER_IN_USE
+        return provider
+    }
+
+    private fun selectProvider(report: MutableMap<String, String>): CronetProvider {
+        val installed = CronetProvider.getAllProviders(context)
+        consider(
+            installed, CronetProvider.PROVIDER_NAME_HTTPENGINE_NATIVE,
+            PROVIDER_INELIGIBLE_PLAT, MIN_ENGINE_VERSION, report
+        )?.let { return it }
+
+        // Deferred past the platform rung: GMS reports disabled until this completes, and it
+        // can block on a Dynamite download.
+        val withGms = try {
             Tasks.await(CronetProviderInstaller.installProvider(context))
             CronetProvider.getAllProviders(context)
         } catch (e: Exception) {
-            CronetProvider.getAllProviders(context)
+            installed
         }
 
-        val provider = sequenceOf(
-            providers.find { it.isEnabled && it.name == "Google-Play-Services-Cronet-Provider" },
-            providers.find { it.isEnabled && it.name !in setOf("Google-Play-Services-Cronet-Provider", "Java-Cronet-Provider") },
-            providers.find { it.isEnabled && it.name == "Java-Cronet-Provider" },
-            runCatching {
-                val cls = Class.forName("org.chromium.net.impl.JavaCronetProvider")
-                cls.getConstructor(Context::class.java).newInstance(context) as CronetProvider
-            }.getOrNull()
-        ).filterNotNull().firstOrNull() ?: throw IllegalStateException("No Cronet provider available")
+        consider(withGms, GMS_PROVIDER_NAME, PROVIDER_NOT_PRESENT, MIN_ENGINE_VERSION, report)
+            ?.let { return it }
+        consider(withGms, CronetProvider.PROVIDER_NAME_APP_PACKAGED, PROVIDER_NOT_PRESENT, null, report)
+            ?.let { return it }
+        consider(withGms, CronetProvider.PROVIDER_NAME_FALLBACK, PROVIDER_NOT_PRESENT, null, report)
+            ?.let { return it }
+
+        val reflective = runCatching {
+            Class.forName(JAVA_PROVIDER_CLASS)
+                .getConstructor(Context::class.java)
+                .newInstance(context) as CronetProvider
+        }.getOrNull() ?: throw IllegalStateException("No Cronet provider available")
+
+        val version = runCatching { reflective.version }.getOrNull()
+        report[if (version == null) reflective.name else "${reflective.name}:$version"] = PROVIDER_IN_USE
+        return reflective
+    }
+
+    @Suppress("UnsafeOptInUsageError", "DEPRECATION")
+    private fun buildEngine(resolver: DohResolver?): CronetEngine {
+        val report = LinkedHashMap<String, String>()
+        val provider = selectProvider(report)
+        providerReport = report
 
         val builder = provider.createBuilder().apply {
             enableBrotli(config.cronetConfig.enableBrotli)

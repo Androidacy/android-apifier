@@ -136,7 +136,7 @@ class CronetCallInterceptor(
 
             override fun onFailed(
                 req: UrlRequest,
-                info: UrlResponseInfo?,
+                info: UrlResponseInfo,
                 error: CronetException
             ) {
                 callbackError.set(IOException("Cronet request failed", error))

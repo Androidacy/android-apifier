@@ -52,6 +52,12 @@ class ApifierClient(context: Context, config: NetworkConfig) {
      */
     val dohActive: Boolean get() = httpClientBuilder.dohActive
 
+    /**
+     * Provider selection outcome in ladder order. Keys are `name:version`, values are the
+     * `HttpClientBuilder.PROVIDER_*` statuses.
+     */
+    val providerReport: Map<String, String> get() = httpClientBuilder.providerReport
+
     /** Enqueues an async GET. Returns the [Call] for cancellation. */
     fun get(url: String, callback: Callback): Call {
         val request = Request.Builder().url(url).get().build()
