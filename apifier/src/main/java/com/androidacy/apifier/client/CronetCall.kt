@@ -38,6 +38,7 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -152,14 +153,25 @@ internal class CronetCall(
     private fun deliverResponse(response: Response) {
         val target = callback ?: return
         if (delivered.compareAndSet(false, true)) {
-            deliveryExecutor.execute { target.onResponse(this, response) }
+            deliver { target.onResponse(this, response) }
         }
     }
 
     private fun deliverFailure(e: IOException) {
         val target = callback ?: return
         if (delivered.compareAndSet(false, true)) {
-            deliveryExecutor.execute { target.onFailure(this, e) }
+            deliver { target.onFailure(this, e) }
+        }
+    }
+
+    private fun deliver(outcome: () -> Unit) {
+        try {
+            deliveryExecutor.execute(outcome)
+        } catch (_: RejectedExecutionException) {
+            // The transport shut down between claiming the delivery and handing it off. The
+            // claim cannot be given back, so running here is the last path to a terminal
+            // callback; the alternative is a consumer that waits forever.
+            outcome()
         }
     }
 

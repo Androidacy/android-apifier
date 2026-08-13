@@ -35,6 +35,7 @@ import org.robolectric.RobolectricTestRunner
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.Executor
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.AbstractMap
 import com.androidacy.apifier.http.Call as ApifierCall
@@ -222,10 +223,21 @@ class CronetCallTest {
             }
         }.apply { isDaemon = true; start() }
 
-        Thread.sleep(300)
-        val stalled = accepted.get()
-        val reads = harness.urlRequest.reads
+        // Sampling while the pusher is still moving would catch it between the base callback's
+        // read and its own counter, so wait for the count to hold still first.
+        var stalled = -1
+        val deadline = System.nanoTime() + 3_000_000_000L
+        while (System.nanoTime() < deadline) {
+            val before = accepted.get()
+            Thread.sleep(150)
+            if (accepted.get() == before && before > 0) {
+                stalled = before
+                break
+            }
+        }
+        val reads = harness.urlRequest.reads.get()
 
+        assertTrue("pusher never stalled", stalled > 0)
         assertTrue("accepted $stalled of $chunks chunks with nobody draining", stalled < chunks)
         // One read is armed per accepted chunk, plus the one that followed the headers. The
         // engine is never let run ahead of the reader, so nothing accumulates off-pipe.
@@ -236,6 +248,30 @@ class CronetCallTest {
 
         assertEquals(chunkSize * chunks, drained.size)
         assertEquals(chunks, accepted.get())
+    }
+
+    @Test
+    fun responseSurvivesDeliveryExecutorShutdown() {
+        val harness = Harness(deliveryExecutor = Executors.newSingleThreadExecutor().apply { shutdown() })
+        harness.enqueue()
+
+        harness.cronetCallback.onResponseStarted(harness.urlRequest, info())
+
+        assertEquals(1, harness.callback.responses.size)
+    }
+
+    @Test
+    fun failureSurvivesDeliveryExecutorShutdown() {
+        val harness = Harness(deliveryExecutor = Executors.newSingleThreadExecutor().apply { shutdown() })
+        harness.enqueue()
+
+        harness.cronetCallback.onFailed(
+            harness.urlRequest,
+            info(),
+            FakeNetworkException(NetworkException.ERROR_CONNECTION_REFUSED)
+        )
+
+        assertEquals(1, harness.callback.failures.size)
     }
 
     @Test
@@ -288,7 +324,8 @@ class CronetCallTest {
 
     private class Harness(
         method: String = "GET",
-        listener: TransportListener? = null
+        listener: TransportListener? = null,
+        deliveryExecutor: Executor = Executor { it.run() }
     ) {
         val urlRequest = FakeUrlRequest()
         val callback = RecordingCallback()
@@ -298,7 +335,7 @@ class CronetCallTest {
             Request.Builder().url("https://example.com/").method(method, null).build(),
             5_000L,
             listener,
-            Executor { it.run() }
+            deliveryExecutor
         ) { cronetCallback, _ ->
             this.cronetCallback = cronetCallback
             urlRequest
@@ -319,7 +356,7 @@ class CronetCallTest {
         var started = 0
         var canceled = 0
         var followed = 0
-        @Volatile var reads = 0
+        val reads = AtomicInteger()
         var onStart: (() -> Unit)? = null
 
         override fun start() {
@@ -332,7 +369,7 @@ class CronetCallTest {
         }
 
         override fun read(buffer: ByteBuffer) {
-            reads++
+            reads.incrementAndGet()
         }
 
         override fun cancel() {
