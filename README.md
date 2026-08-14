@@ -203,6 +203,8 @@ backend is configured.
   `close()` when you are done with it.
 - DoH resolution and the OkHttp interceptor are gone. Configure TLS trust through your app's
   Network Security Configuration, and protected-domain checking through `protectedDomains(...)`.
+- `protectedDomains(...)` rejects a hostname with a trailing dot, and the client constructor throws
+  on it. Pass `api.example.com`, not `api.example.com.`
 
 ## Requirements
 

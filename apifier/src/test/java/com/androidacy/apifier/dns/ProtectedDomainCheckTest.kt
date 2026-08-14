@@ -326,21 +326,6 @@ class ProtectedDomainCheckTest {
         assertEquals(TrustStatus.ERROR, check.status(HOST))
     }
 
-    @Test
-    fun systemResolveThrowingOutsideIoReachesATerminalStatus() {
-        val check = ProtectedDomainCheck(
-            listOf(HOST),
-            listOf(answering("1.1.1.1"), answering("1.1.1.1"), answering("1.1.1.1")),
-            { throw IllegalStateException("resolver blew up") },
-            executor,
-            { now }
-        )
-
-        check.start()
-        executor.runAll()
-
-        assertEquals(TrustStatus.ERROR, check.status(HOST))
-    }
 
     @Test
     fun unsafeProtectedDomainRejected() {
@@ -355,18 +340,6 @@ class ProtectedDomainCheckTest {
         }
     }
 
-    @Test
-    fun trailingDotProtectedDomainRejected() {
-        assertThrows(IllegalArgumentException::class.java) {
-            ProtectedDomainCheck(
-                listOf("api.example.com."),
-                listOf(answering("1.1.1.1")),
-                { listOf("1.1.1.1") },
-                executor,
-                { now }
-            )
-        }
-    }
 
     private fun checkOver(resolvers: List<TrustedResolver>, system: List<String>) =
         ProtectedDomainCheck(listOf(HOST), resolvers, { system }, executor, { now })

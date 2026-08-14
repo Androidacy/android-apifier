@@ -47,7 +47,7 @@ class ProtectedDomainCheck internal constructor(
 ) {
 
     private val domains: Set<String> = protectedDomains.map { domain ->
-        require(AddressClassifier.isSafeHostname(domain)) { "Unsafe protected domain: $domain" }
+        require(AddressClassifier.isSafeHostname(domain)) { "Unsafe protected domain: \"$domain\"" }
         domain.lowercase()
     }.toSet()
 
