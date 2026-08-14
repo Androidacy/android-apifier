@@ -19,6 +19,7 @@ import android.util.Log
 import com.androidacy.apifier.http.ErrorCode
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -27,14 +28,13 @@ import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.onSubscription
+import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.Closeable
 import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 
 /** Whether an attempt reached a response or failed before one arrived. */
 enum class Outcome { SUCCESS, FAILED }
@@ -74,6 +74,13 @@ fun interface RequestObserver {
     fun onEvent(event: RequestEvent)
 }
 
+/** One emitted delivery, carried on the internal compat channel alongside its optional per-call target. */
+@Suppress("DEPRECATION")
+private data class CompatDelivery(val event: RequestEvent, val perRequest: RequestObserver?)
+
+/** Sentinel [close] emits after the last real delivery, to end the compat collector's loop. */
+private object CompatEndOfStream
+
 /**
  * Fans a [RequestEvent] out through [events] and, for the attempt that ends a logical call, an
  * optional per-request observer.
@@ -90,10 +97,6 @@ internal class Observation(
     private val closed = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
 
-    // Every unit dispatched off emit() (the compat fan-out and each perRequest callback) holds
-    // this open; close() waits for it to hit zero before it stops accepting new work.
-    private val pendingDeliveries = AtomicInteger(0)
-
     private val mutableEvents = MutableSharedFlow<RequestEvent>(
         replay = 0,
         extraBufferCapacity = EVENT_BUFFER_CAPACITY,
@@ -103,24 +106,24 @@ internal class Observation(
     /** Every [RequestEvent] this client's pipeline reports. Collecting never backpressures a call. */
     val events: SharedFlow<RequestEvent> = mutableEvents.asSharedFlow()
 
-    private val collectorSubscribed = CountDownLatch(1)
+    // Carries both the global fan-out and each perRequest delivery through one buffer, in emit()
+    // order, so DROP_OLDEST's "newest survives" guarantee also covers perRequest: a delivery
+    // dropped here was never handed to the collector, so nothing about it needs draining on close.
+    private val compatChannel = MutableSharedFlow<Any>(
+        replay = 0,
+        extraBufferCapacity = EVENT_BUFFER_CAPACITY,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
 
-    // Fans events out to addObserver() registrants for as long as that API exists. Subscribing
-    // is forced to finish before the constructor returns below: tryEmit on a replay=0 flow with
-    // zero subscribers drops the value, so a collector started fire-and-forget could lose every
-    // event emitted before it happened to attach.
-    private val compatCollector: Job = scope.launch {
-        mutableEvents.onSubscription { collectorSubscribed.countDown() }.collect { event ->
-            try {
-                for (observer in observers) dispatch(observer, event)
-            } finally {
-                pendingDeliveries.decrementAndGet()
-            }
+    // UNDISPATCHED runs this body on the constructing thread up to its first suspension;
+    // SharedFlow.collect registers its subscriber slot before that suspension, so the collector
+    // is a subscriber before the constructor returns, and no emit() before it can be missed.
+    private val compatCollector: Job = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+        compatChannel.takeWhile { it !== CompatEndOfStream }.collect { signal ->
+            val delivery = signal as CompatDelivery
+            for (observer in observers) dispatch(observer, delivery.event)
+            delivery.perRequest?.let { dispatch(it, delivery.event) }
         }
-    }
-
-    init {
-        collectorSubscribed.await()
     }
 
     fun addObserver(observer: RequestObserver) {
@@ -131,35 +134,24 @@ internal class Observation(
         observers.remove(observer)
     }
 
-    /** Publishes [event] to [events] and, off the calling thread, to [perRequest]. Never throws. */
+    /** Publishes [event] to [events] and, off the calling thread, to [observers] and [perRequest]. Never throws. */
     fun emit(event: RequestEvent, perRequest: RequestObserver?) {
         if (closed.get()) return
-        pendingDeliveries.incrementAndGet()
-        if (!mutableEvents.tryEmit(event)) pendingDeliveries.decrementAndGet()
-        if (perRequest != null) {
-            pendingDeliveries.incrementAndGet()
-            scope.launch {
-                try {
-                    dispatch(perRequest, event)
-                } finally {
-                    pendingDeliveries.decrementAndGet()
-                }
-            }
-        }
+        mutableEvents.tryEmit(event)
+        compatChannel.tryEmit(CompatDelivery(event, perRequest))
     }
 
-    /** Marks closed, then blocks until every already-emitted event has been delivered. */
+    /**
+     * Marks closed, then blocks until every event already handed to the compat collector has
+     * been delivered. [CompatEndOfStream] rides the same DROP_OLDEST buffer as those deliveries,
+     * so by the time the collector reaches it every delivery still ahead of it in the buffer is
+     * already dispatched, and DROP_OLDEST guarantees this newest-emitted value is never the one evicted.
+     */
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        awaitDrain()
+        compatChannel.tryEmit(CompatEndOfStream)
+        runBlocking { withTimeoutOrNull(CLOSE_TIMEOUT_MILLIS) { compatCollector.join() } }
         scope.cancel()
-    }
-
-    private fun awaitDrain() {
-        val deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(CLOSE_TIMEOUT_SECONDS)
-        while (pendingDeliveries.get() > 0 && System.nanoTime() < deadlineNanos) {
-            Thread.sleep(DRAIN_POLL_MILLIS)
-        }
     }
 
     private fun dispatch(observer: RequestObserver, event: RequestEvent) {
@@ -171,8 +163,7 @@ internal class Observation(
     }
 
     private companion object {
-        const val CLOSE_TIMEOUT_SECONDS = 5L
-        const val DRAIN_POLL_MILLIS = 5L
+        const val CLOSE_TIMEOUT_MILLIS = 5_000L
         const val EVENT_BUFFER_CAPACITY = 1024
     }
 }

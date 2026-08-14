@@ -181,6 +181,31 @@ class ObservationTest {
         assertEquals(20, delivered.get())
     }
 
+    /**
+     * Production change that fails this: counting a delivery as pending at emit() time and only
+     * clearing it when the compat collector actually processes the event. A slow observer stalls
+     * that collector; DROP_OLDEST then evicts events that were never handed to it, so their count
+     * never clears, and close() burns the full close timeout waiting for a number that can't reach zero.
+     */
+    @Test
+    fun closeDoesNotStrandCountOnEventsDroppedByASlowObserver() {
+        val observation = Observation()
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        observation.addObserver {
+            started.countDown()
+            release.await(5, TimeUnit.SECONDS)
+        }
+
+        observation.emit(sampleEvent(), null)
+        assertTrue(started.await(2, TimeUnit.SECONDS))
+        repeat(EVENT_BUFFER_CAPACITY + 50) { observation.emit(sampleEvent(), null) }
+        release.countDown()
+
+        val elapsedMs = measureMillis { observation.close() }
+        assertTrue("close() took ${elapsedMs}ms", elapsedMs < 1_000)
+    }
+
     /** Production change that fails this: letting the closed-state check in emit() fall through. */
     @Test
     fun eventsAfterCloseAreDroppedNotThrown() {
