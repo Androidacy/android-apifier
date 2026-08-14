@@ -109,6 +109,10 @@ internal class PipelineCall {
     @Volatile
     var attempt: Int = 0
 
+    /** Set the instant a terminal [RequestEvent] is decided, so [Pipeline.execute]'s catch-all never double-reports it. */
+    @Volatile
+    var terminalEventEmitted: Boolean = false
+
     val isCanceled: Boolean get() = canceled.get()
 
     /** True once the call-timeout task fired, which outranks whatever the transport then reports. */
@@ -138,8 +142,8 @@ internal class Pipeline(
     private val breakers: BreakerRegistry,
     private val scheduler: ScheduledExecutorService,
     /** Label reported on every [RequestEvent] as the serving provider, e.g. the Cronet engine version. */
-    private val provider: String = "unknown",
-    private val observation: Observation = Observation()
+    private val provider: String,
+    private val observation: Observation
 ) {
 
     init {
@@ -153,6 +157,7 @@ internal class Pipeline(
         val host = checkNotNull(request.uri.host) { "request has no host" }
         val timeoutMs = options.callTimeoutMillis ?: config.timeouts.call.inWholeMilliseconds
         val deadlineAt = System.currentTimeMillis() + timeoutMs
+        val callStartNanos = System.nanoTime()
         val timeoutTask = scheduler.schedule(
             {
                 call.markTimedOut()
@@ -169,6 +174,13 @@ internal class Pipeline(
             attempts(request, options, call, breaker, timeoutMs, deadlineAt, host)
         } catch (e: Throwable) {
             timeoutTask.cancel(false)
+            // The trust gate, the breaker, a surrender ahead of an attempt, and a cancel or
+            // timeout landing in backoff between attempts all end the call without ever reaching
+            // reportAttempt. terminalEventEmitted is only true when reportAttempt already covered
+            // this outcome, which keeps this from doubling that report.
+            if (e is IOException && !call.terminalEventEmitted) {
+                reportTerminalFailure(host, request.method, call, errorCodeOf(e), callStartNanos, options)
+            }
             throw e
         }
 
@@ -220,40 +232,39 @@ internal class Pipeline(
                 val response = attemptOnce(prepared, call, timeoutMs, deadlineAt, metrics)
                 val willRetry = response.code >= 500 && attempt < maxAttempts - 1 && retry.retryOn5xx &&
                     (!retry.retryIdempotentOnly || idempotent)
-                emitAttempt(
+                reportAttempt(
                     host, prepared.method, attempt, willRetry, metrics, attemptStartNanos,
-                    Outcome.SUCCESS, errorCode = null, responseCode = response.code, options
+                    Outcome.SUCCESS, errorCode = null, responseCode = response.code, call, options
                 )
-                if (willRetry) {
-                    response.close()
-                    backoffSleep(backoff.calculateDelay(attempt), call, timeoutMs)
-                    attempt++
-                    continue
+                if (!willRetry) {
+                    // A timeout that landed while this response was in hand outranks it, and the
+                    // body it carries would fail on first read anyway.
+                    if (call.isTimedOut || call.isCanceled) {
+                        response.close()
+                        surrenderIfDone(call, timeoutMs)
+                    }
+                    if (response.code >= 500) breaker?.recordFailure() else breaker?.recordSuccess()
+                    return withProgress(prepared, response)
                 }
-                // A timeout that landed while this response was in hand outranks it, and the
-                // body it carries would fail on first read anyway.
-                if (call.isTimedOut || call.isCanceled) {
-                    response.close()
-                    surrenderIfDone(call, timeoutMs)
-                }
-                if (response.code >= 500) breaker?.recordFailure() else breaker?.recordSuccess()
-                return withProgress(prepared, response)
+                response.close()
             } catch (e: IOException) {
                 val retryable = e !is ApifierException || e.retryable
                 val willRetry = retryable && attempt < maxAttempts - 1 &&
                     (!retry.retryIdempotentOnly || idempotent)
-                emitAttempt(
+                reportAttempt(
                     host, prepared.method, attempt, willRetry, metrics, attemptStartNanos,
-                    Outcome.FAILED, errorCode = errorCodeOf(e), responseCode = null, options
+                    Outcome.FAILED, errorCode = errorCodeOf(e), responseCode = null, call, options
                 )
-                if (willRetry) {
-                    backoffSleep(backoff.calculateDelay(attempt), call, timeoutMs)
-                    attempt++
-                    continue
+                if (!willRetry) {
+                    recordTerminalFailure(breaker, call)
+                    throw surface(e, call, timeoutMs)
                 }
-                recordTerminalFailure(breaker, call)
-                throw surface(e, call, timeoutMs)
             }
+            // Reached only for an attempt that will be retried. Backoff runs outside the try/catch
+            // above so a cancel or timeout here escapes straight to execute()'s catch instead of
+            // being re-caught by the same clause and reported a second time against this attempt.
+            backoffSleep(backoff.calculateDelay(attempt), call, timeoutMs)
+            attempt++
         }
         // The last attempt takes neither retry branch, so the loop always returns or throws.
         error("retry loop ended without an outcome")
@@ -301,12 +312,11 @@ internal class Pipeline(
                 override fun onRedirect(hopUri: Uri, hopHeaders: Headers) = saveCookies(hopUri, hopHeaders)
 
                 override fun onResponseStarted(ttfbMillis: Long) {
-                    metrics.ttfbMillis = ttfbMillis
+                    metrics.recordResponseStarted(ttfbMillis)
                 }
 
                 override fun onTransferComplete(bytesSent: Long, bytesReceived: Long) {
-                    metrics.bytesSent = bytesSent
-                    metrics.bytesReceived = bytesReceived
+                    metrics.recordTransferComplete(bytesSent, bytesReceived)
                 }
             }
         )
@@ -394,10 +404,21 @@ internal class Pipeline(
         if (call.isTimedOut) ApifierException.CallTimeout(timeoutMs) else e
 
     /**
-     * Reports one attempt. The per-request observer is passed only on [willRetry] false, the
-     * attempt that ends the logical call, since it must see exactly one event.
+     * Reports one attempt. [bytesReceived] is only final once the transport's transfer-complete
+     * signal fires, which for a streaming success can be well after this attempt handed its
+     * response back to the caller, so the [RequestEvent] itself is built lazily off
+     * [AttemptMetrics.whenTransferComplete] using the metrics that are final at that point, not
+     * the ones on hand right now.
+     *
+     * [PipelineCall.terminalEventEmitted] is set synchronously here, at the point [willRetry] is
+     * decided, not when the deferred event actually fires: [Pipeline.execute]'s catch-all reads
+     * it immediately after this call returns and must already see whether this attempt is the
+     * call's terminal report.
+     *
+     * The per-request observer is passed only on [willRetry] false, the attempt that ends the
+     * logical call, since it must see exactly one event.
      */
-    private fun emitAttempt(
+    private fun reportAttempt(
         host: String,
         method: String,
         attemptIndex: Int,
@@ -407,23 +428,62 @@ internal class Pipeline(
         outcome: Outcome,
         errorCode: ErrorCode?,
         responseCode: Int?,
+        call: PipelineCall,
         options: CallOptions
     ) {
-        val event = RequestEvent(
-            outcome = outcome,
-            errorCode = errorCode,
-            responseCode = responseCode,
-            elapsedMillis = (System.nanoTime() - attemptStartNanos) / NANOS_PER_MILLI,
-            ttfbMillis = metrics.ttfbMillis,
-            bytesSent = metrics.bytesSent,
-            bytesReceived = metrics.bytesReceived,
-            host = host,
-            method = method,
-            attempt = attemptIndex + 1,
-            provider = provider,
-            willRetry = willRetry
+        if (!willRetry) call.terminalEventEmitted = true
+        val perRequest = if (willRetry) null else options.observer
+        metrics.whenTransferComplete {
+            observation.emit(
+                RequestEvent(
+                    outcome = outcome,
+                    errorCode = errorCode,
+                    responseCode = responseCode,
+                    elapsedMillis = (System.nanoTime() - attemptStartNanos) / NANOS_PER_MILLI,
+                    ttfbMillis = metrics.ttfbMillis,
+                    bytesSent = metrics.bytesSent,
+                    bytesReceived = metrics.bytesReceived,
+                    host = host,
+                    method = method,
+                    attempt = attemptIndex + 1,
+                    provider = provider,
+                    willRetry = willRetry
+                ),
+                perRequest
+            )
+        }
+    }
+
+    /**
+     * Reports a call-ending failure that never reached [reportAttempt]: the trust gate, the
+     * breaker, a surrender ahead of an attempt, or a cancel/timeout landing in backoff between
+     * attempts. Nothing reached the transport, so there is nothing to wait on; the metrics are zero.
+     */
+    private fun reportTerminalFailure(
+        host: String,
+        method: String,
+        call: PipelineCall,
+        errorCode: ErrorCode,
+        callStartNanos: Long,
+        options: CallOptions
+    ) {
+        observation.emit(
+            RequestEvent(
+                outcome = Outcome.FAILED,
+                errorCode = errorCode,
+                responseCode = null,
+                elapsedMillis = (System.nanoTime() - callStartNanos) / NANOS_PER_MILLI,
+                ttfbMillis = null,
+                bytesSent = 0L,
+                bytesReceived = 0L,
+                host = host,
+                method = method,
+                attempt = call.attempt + 1,
+                provider = provider,
+                willRetry = false
+            ),
+            options.observer
         )
-        observation.emit(event, if (willRetry) null else options.observer)
     }
 
     private fun errorCodeOf(e: IOException): ErrorCode = (e as? ApifierException)?.errorCode ?: ErrorCode.OTHER
@@ -437,16 +497,48 @@ internal class Pipeline(
     }
 }
 
-/** Per-attempt timing and byte counts, filled from [TransportListener] as the attempt runs. */
+/**
+ * Per-attempt timing and byte counts, filled from [TransportListener] as the attempt runs.
+ *
+ * [bytesReceived] is only correct once [recordTransferComplete] has run: the transport can
+ * deliver a response (and headers-only consumers can read it) well before the network transfer
+ * that fills it is over. [whenTransferComplete] is how a caller waits for that without polling or
+ * blocking the thread that is about to hand the response back to its own caller.
+ */
 private class AttemptMetrics {
     @Volatile
     var ttfbMillis: Long? = null
+        private set
 
     @Volatile
     var bytesSent: Long = 0L
+        private set
 
     @Volatile
     var bytesReceived: Long = 0L
+        private set
+
+    private var completed = false
+    private var onComplete: (() -> Unit)? = null
+
+    fun recordResponseStarted(ttfbMillis: Long) {
+        this.ttfbMillis = ttfbMillis
+    }
+
+    @Synchronized
+    fun recordTransferComplete(bytesSent: Long, bytesReceived: Long) {
+        this.bytesSent = bytesSent
+        this.bytesReceived = bytesReceived
+        completed = true
+        onComplete?.invoke()
+        onComplete = null
+    }
+
+    /** Runs [action] once [recordTransferComplete] has run; immediately if it already has. */
+    @Synchronized
+    fun whenTransferComplete(action: () -> Unit) {
+        if (completed) action() else onComplete = action
+    }
 }
 
 /**

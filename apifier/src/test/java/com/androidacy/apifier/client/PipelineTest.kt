@@ -35,6 +35,7 @@ import com.androidacy.apifier.http.Response
 import com.androidacy.apifier.http.ResponseBody
 import com.androidacy.apifier.http.ResponseBody.Companion.asResponseBody
 import com.androidacy.apifier.http.ResponseBody.Companion.toResponseBody
+import com.androidacy.apifier.observe.Observation
 import com.androidacy.apifier.progress.ProgressListener
 import com.androidacy.apifier.security.PublicSuffixList
 import okio.Buffer
@@ -64,10 +65,12 @@ class PipelineTest {
 
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
     private val psl = PublicSuffixList(sequenceOf("com"))
+    private val observation = Observation()
 
     @After
     fun tearDown() {
         scheduler.shutdownNow()
+        observation.close()
     }
 
     @Test
@@ -431,7 +434,9 @@ class PipelineTest {
         if (jar == null) null else psl,
         trustCheck,
         breakers,
-        scheduler
+        scheduler,
+        "test-provider",
+        observation
     )
 
     private fun ok(

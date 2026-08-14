@@ -18,9 +18,11 @@ package com.androidacy.apifier.observe
 import android.util.Log
 import com.androidacy.apifier.http.ErrorCode
 import java.io.Closeable
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
 /** Whether an attempt reached a response or failed before one arrived. */
@@ -64,9 +66,15 @@ fun interface RequestObserver {
  * delivery, or the request thread that called [emit].
  */
 internal class Observation(
-    private val executor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "Apifier-Observation").apply { isDaemon = true }
-    }
+    // Bounded so a stalled consumer observer accumulates at most QUEUE_CAPACITY events instead of
+    // growing without limit; DiscardOldestPolicy keeps the newest telemetry under back-pressure,
+    // matching the documented degrade-don't-block posture instead of applying it only in emit().
+    private val executor: ExecutorService = ThreadPoolExecutor(
+        1, 1, 0L, TimeUnit.MILLISECONDS,
+        ArrayBlockingQueue(QUEUE_CAPACITY),
+        { runnable -> Thread(runnable, "Apifier-Observation").apply { isDaemon = true } },
+        ThreadPoolExecutor.DiscardOldestPolicy()
+    )
 ) : Closeable {
 
     private val observers = CopyOnWriteArrayList<RequestObserver>()
@@ -79,10 +87,20 @@ internal class Observation(
         observers.remove(observer)
     }
 
+    /**
+     * Enqueues [event] and returns without waiting. A call still in flight when [close] has
+     * already shut the executor down would otherwise throw [RejectedExecutionException] into the
+     * network thread that called this; that is dropped like any other back-pressure event.
+     */
     fun emit(event: RequestEvent, perRequest: RequestObserver?) {
-        executor.execute {
-            for (observer in observers) dispatch(observer, event)
-            perRequest?.let { dispatch(it, event) }
+        try {
+            executor.execute {
+                for (observer in observers) dispatch(observer, event)
+                perRequest?.let { dispatch(it, event) }
+            }
+        } catch (e: RejectedExecutionException) {
+            // Closed or momentarily saturated past the DiscardOldestPolicy's own retry; either
+            // way this event is lost, which is the documented degrade-don't-block posture.
         }
     }
 
@@ -106,6 +124,7 @@ internal class Observation(
 
     private companion object {
         const val CLOSE_TIMEOUT_SECONDS = 5L
+        const val QUEUE_CAPACITY = 1024
     }
 }
 

@@ -283,7 +283,7 @@ class ApifierClientTest {
 
         override fun newCall(request: Request, listener: TransportListener?): Call {
             synchronized(requests) { requests.add(request) }
-            return FakeCall(request)
+            return FakeCall(request, listener)
         }
 
         override fun shutdown() {
@@ -294,8 +294,14 @@ class ApifierClientTest {
             synchronized(entries) { entries.add(entry) }
         }
 
-        /** Mirrors the transport contract: exactly one terminal callback, and a prompt cancel. */
-        private inner class FakeCall(private val request: Request) : Call {
+        /**
+         * Mirrors the transport contract: exactly one terminal callback, a prompt cancel, and
+         * byte counting unconditional on and after delivery, the ordering the real transport has.
+         */
+        private inner class FakeCall(
+            private val request: Request,
+            private val listener: TransportListener?
+        ) : Call {
 
             private val canceled = AtomicBoolean(false)
             private val delivered = AtomicBoolean(false)
@@ -310,8 +316,10 @@ class ApifierClientTest {
                     if (canceled.get()) {
                         deliver { callback.onFailure(this, ApifierException.Cancelled()) }
                     } else {
+                        listener?.onResponseStarted(0)
                         deliver { callback.onResponse(this, respond(request)) }
                     }
+                    listener?.onTransferComplete(0, 0)
                 }
             }
 
