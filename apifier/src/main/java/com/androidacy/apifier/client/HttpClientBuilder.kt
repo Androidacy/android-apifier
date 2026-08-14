@@ -60,9 +60,6 @@ class HttpClientBuilder(
         }
     }
 
-    @Deprecated("DoH resolution removed; deleted in 3.0.0 config cleanup")
-    val dohActive: Boolean = false
-
     /**
      * Provider selection outcome in ladder order. Keys are `name:version`, or the bare name
      * when the version could not be read. Empty until [build] runs.
@@ -159,7 +156,7 @@ class HttpClientBuilder(
                 config.cronetConfig.quicHints.forEach { (host, port, alternatePort) -> addQuicHint(host, port, alternatePort) }
             }
 
-            if (config.cronetConfig.enableDnsOverHttps) {
+            if (config.cronetConfig.enableBuiltInDnsResolver) {
                 setDnsOptions(
                     DnsOptions.builder()
                         .preestablishConnectionsToStaleDnsResults(config.cronetConfig.enableStaleDns)

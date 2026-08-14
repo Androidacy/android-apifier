@@ -1,16 +1,10 @@
 # Apifier consumer ProGuard rules
 
-# Keep Cronet classes
+# Cronet loads implementation classes reflectively and registers JNI symbols.
 -keep class org.chromium.net.** { *; }
 -keep class com.google.android.gms.net.** { *; }
 
-# Keep OkHttp classes
--dontwarn okhttp3.**
--dontwarn okio.**
--keep class okhttp3.** { *; }
--keep interface okhttp3.** { *; }
+# Public API surface for library consumers.
+-keep public class com.androidacy.apifier.** { public protected *; }
 
-# Keep public API
--keep public class com.androidacy.apifier.** {
-    public protected *;
-}
+-dontwarn okio.**

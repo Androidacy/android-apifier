@@ -56,11 +56,9 @@ android {
 }
 
 dependencies {
-    // OkHttp
-    api("com.squareup.okhttp3:okhttp:5.4.0")
-
-    // Okio, used directly by the com.androidacy.apifier.http types and not only through OkHttp
-    api("com.squareup.okio:okio:3.17.0")
+    // Okio, used directly by the com.androidacy.apifier.http types (RequestBody.writeTo,
+    // ResponseBody.source)
+    api("com.squareup.okio:okio:3.18.1")
 
     // Cronet
     api("com.google.android.gms:play-services-cronet:18.1.1")
@@ -96,11 +94,11 @@ afterEvaluate {
                 artifact(dokkaJavadocJar)
                 groupId = "com.github.Androidacy"
                 artifactId = "android-apifier"
-                version = "2.0.0"
+                version = "3.0.0"
 
                 pom {
                     name.set("Android Apifier")
-                    description.set("HTTP and API networking library for Android with Cronet and OkHttp")
+                    description.set("Cronet-native HTTP and API networking library for Android")
                     url.set("https://github.com/Androidacy/android-apifier")
                     licenses {
                         license {
