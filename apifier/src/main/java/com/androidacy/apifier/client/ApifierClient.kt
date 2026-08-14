@@ -260,6 +260,9 @@ class ApifierClient internal constructor(
      *
      * @throws IllegalStateException the client is closed.
      */
+    @Deprecated(
+        "Call the suspend fun send(request) instead of building a Call. Will be removed in 4.0."
+    )
     @Suppress("DEPRECATION")
     fun call(request: Request): Call = call(request, CallOptions())
 
@@ -270,11 +273,16 @@ class ApifierClient internal constructor(
     }
 
     /** Enqueues an async GET. Returns the [Call] for cancellation. */
+    @Deprecated("Call the suspend fun get(url) instead of passing a Callback. Will be removed in 4.0.")
     @Suppress("DEPRECATION")
     fun get(url: String, callback: Callback): Call =
         enqueue(Request.Builder().url(url).get().build(), callback)
 
     /** Enqueues an async POST. [contentType] defaults to JSON. Returns the [Call] for cancellation. */
+    @Deprecated(
+        "Call the suspend fun post(url, body, contentType) instead of passing a Callback. " +
+            "Will be removed in 4.0."
+    )
     @Suppress("DEPRECATION")
     fun post(url: String, body: String, contentType: String = "application/json", callback: Callback): Call {
         val requestBody = body.toRequestBody(contentType.toMediaTypeOrNull())
@@ -282,16 +290,22 @@ class ApifierClient internal constructor(
     }
 
     /** Enqueues an async DELETE. Returns the [Call] for cancellation. */
+    @Deprecated("Call the suspend fun delete(url) instead of passing a Callback. Will be removed in 4.0.")
     @Suppress("DEPRECATION")
     fun delete(url: String, callback: Callback): Call =
         enqueue(Request.Builder().url(url).delete().build(), callback)
 
     /** Enqueues an async HEAD. Returns the [Call] for cancellation. */
+    @Deprecated("Call the suspend fun head(url) instead of passing a Callback. Will be removed in 4.0.")
     @Suppress("DEPRECATION")
     fun head(url: String, callback: Callback): Call =
         enqueue(Request.Builder().url(url).head().build(), callback)
 
     /** GET with progress tracking; see [Requester.progress] for how [progress] must be built. */
+    @Deprecated(
+        "Call the suspend fun get(url) on a client.progress(sink) view instead of passing a " +
+            "Callback. Will be removed in 4.0."
+    )
     @Suppress("DEPRECATION")
     fun download(url: String, progress: MutableSharedFlow<Progress>, callback: Callback): Call {
         val request = Request.Builder().url(url).get().build()
@@ -299,6 +313,10 @@ class ApifierClient internal constructor(
     }
 
     /** Multipart file upload. [fileNames] are form-data field names matching [files] by index. */
+    @Deprecated(
+        "Call the suspend fun upload(url, files, fileNames) instead of passing a Callback. " +
+            "Will be removed in 4.0."
+    )
     @Suppress("DEPRECATION")
     fun upload(
         url: String,

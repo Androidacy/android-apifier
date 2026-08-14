@@ -77,6 +77,7 @@ class ApifierClientTest {
     private val context: Context get() = ApplicationProvider.getApplicationContext()
 
     @Test
+    @Suppress("DEPRECATION")
     fun helpersBuildEquivalentRequests() {
         val engine = FakeEngine()
         val client = clientOf(engine)
@@ -242,6 +243,7 @@ class ApifierClientTest {
     }
 
     @Test
+    @Suppress("DEPRECATION")
     fun closeDeliversObservationEventsFromItsOwnCancellations() {
         val engine = FakeEngine(hang = true)
         val client = clientOf(engine)
@@ -340,6 +342,7 @@ class ApifierClientTest {
     }
 
     @Test
+    @Suppress("DEPRECATION")
     fun closeFinishesEveryStepWhenOneThrows() {
         val engine = FakeEngine(shutdownThrows = true)
         val client = clientOf(engine)
@@ -356,6 +359,7 @@ class ApifierClientTest {
     }
 
     @Test
+    @Suppress("DEPRECATION")
     fun observerRegistrationRoundTrips() {
         val engine = FakeEngine()
         val client = clientOf(engine)
@@ -399,6 +403,7 @@ class ApifierClientTest {
      * it fails when close throws or hangs.
      */
     @Test
+    @Suppress("DEPRECATION")
     fun liveEngineShutdownEndsWithoutThrowingOrHanging() {
         val provider = Class.forName("org.chromium.net.impl.JavaCronetProvider")
             .getConstructor(Context::class.java)
