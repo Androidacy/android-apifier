@@ -8,3 +8,8 @@
 -keep public class com.androidacy.apifier.** { public protected *; }
 
 -dontwarn okio.**
+
+# DataStoreCookieStorage is kept by the rule above and compiled against androidx.datastore, which
+# is compileOnly. A consumer that does not depend on DataStore has no such classes for R8 to
+# resolve, and full mode treats the missing references as errors.
+-dontwarn androidx.datastore.**

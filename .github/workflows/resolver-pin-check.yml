@@ -20,11 +20,14 @@ jobs:
           bundle=apifier/src/main/res/raw/apifier_resolver_roots.pem
           status=0
           for address in 1.1.1.1 8.8.8.8 94.140.14.140; do
-            chain=$(openssl s_client -connect "$address:443" -CAfile "$bundle" -no-CApath -no-CAstore </dev/null 2>/dev/null)
+            # -verify_ip is the point of the check: the resolvers are dialed by IP literal, so a
+            # certificate that keeps its pinned root but drops the IP SAN still blocks every
+            # protected domain, and a chain-only verification would pass while it happened.
+            chain=$(openssl s_client -connect "$address:443" -verify_ip "$address" -CAfile "$bundle" -no-CApath -no-CAstore </dev/null 2>/dev/null)
             if printf '%s' "$chain" | grep -q 'Verify return code: 0 (ok)'; then
-              echo "ok: $address anchors at a pinned root"
+              echo "ok: $address anchors at a pinned root and covers its IP literal"
             else
-              echo "FAIL: $address no longer anchors at a root in $bundle"
+              echo "FAIL: $address no longer anchors at a root in $bundle, or dropped its IP SAN"
               printf '%s' "$chain" | grep -E 'Verify return code|^ *[0-9] [si]:' || true
               status=1
             fi
