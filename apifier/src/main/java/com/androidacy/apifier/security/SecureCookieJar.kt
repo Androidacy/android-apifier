@@ -208,7 +208,8 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
 
     /**
      * Load an existing key, or generate one with the best available hardware backing:
-     * StrongBox (secure element) → TEE/TrustZone → software Keystore → null (Base64 fallback).
+     * StrongBox (secure element) → TEE/TrustZone → software Keystore. Null when none is
+     * available, which drops cookies instead of persisting them in cleartext.
      */
     private fun loadOrCreateKey(): SecretKey? {
         return try {
@@ -219,7 +220,7 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
             }
             generateStrongBoxKey() ?: generateDefaultKey()
         } catch (e: Exception) {
-            Log.w(TAG, "Android Keystore unavailable, cookies will not be encrypted: ${e.message}")
+            Log.w(TAG, "Android Keystore unavailable, cookies will not be persisted: ${e.message}")
             null
         }
     }

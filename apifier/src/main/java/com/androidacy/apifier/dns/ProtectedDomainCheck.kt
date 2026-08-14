@@ -152,9 +152,8 @@ class ProtectedDomainCheck internal constructor(
             val verdict = try {
                 evaluate(host)
             } catch (e: Throwable) {
-                // Anything escaping here is swallowed by the executor, leaving the host at UNKNOWN
-                // for the life of the process with nothing recording why. ERROR covers a failure to
-                // check; FAIL would assert evidence about the answer that a crash here cannot carry.
+                // Without this the executor swallows it and the host stays UNKNOWN for the
+                // life of the process.
                 TrustStatus.ERROR
             } finally {
                 state.running.set(false)
@@ -204,9 +203,8 @@ class ProtectedDomainCheck internal constructor(
             }
         }
 
-        // Rule (c) first: a rejected certificate is direct evidence of interception on a
-        // connection dialed to an IP literal against a pinned root, so it decides alone even
-        // when the remaining resolvers agree with the system answer.
+        // Decides alone, ahead of the answer comparison: these connections are dialed to an IP
+        // literal against a pinned root, so a rejected certificate is interception.
         if (certificateRejected) return TrustStatus.FAIL
         if (answers.size < MIN_USABLE_ANSWERS) return TrustStatus.ERROR
 

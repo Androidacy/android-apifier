@@ -329,8 +329,7 @@ class ApifierClient internal constructor(
         check(!inCallback.get()) { "close() must not be called from a callback of this client" }
         if (!closed.compareAndSet(false, true)) return
 
-        // Steps are independent, and a second close() returns at the guard above: one that throws
-        // must not take the rest of the teardown with it.
+        // One failing step must not take the rest of the teardown with it.
         teardown {
             networkCallback?.let { callback -> connectivity?.unregisterNetworkCallback(callback) }
         }
@@ -355,8 +354,8 @@ class ApifierClient internal constructor(
         workers.shutdown()
         val deadline = System.currentTimeMillis() + DRAIN_TIMEOUT_MS
         try {
-            // Polling rather than awaitTermination alone: a call running on a caller's thread
-            // through execute() is in flight without occupying a worker.
+            // awaitTermination alone would miss a call running on a caller's thread through
+            // execute(), which is in flight without occupying a worker.
             while (inFlight.isNotEmpty() && System.currentTimeMillis() < deadline) {
                 Thread.sleep(DRAIN_POLL_MS)
             }
@@ -421,8 +420,6 @@ class ApifierClient internal constructor(
 
         private fun begin() {
             check(started.compareAndSet(false, true)) { "Call already enqueued" }
-            // The scheduler and the engine are already down, so a run started here would fail
-            // somewhere unhelpful instead of at the call that should not have been made.
             check(!closed.get()) { CLOSED_MESSAGE }
             inFlight.add(this)
         }

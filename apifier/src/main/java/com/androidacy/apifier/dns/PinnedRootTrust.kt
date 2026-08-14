@@ -35,7 +35,7 @@ import javax.net.ssl.X509TrustManager
  * the system store cannot make an intercepted resolver look genuine.
  *
  * There is no fallback anywhere in this class. A failure to load or initialize throws out of the
- * constructor, because a check that quietly degrades to the platform trust store would report
+ * constructor, because a check that silently degrades to the platform trust store would report
  * trust it never established.
  */
 internal class PinnedRootTrust(roots: List<X509Certificate>) {

@@ -66,9 +66,8 @@ fun interface RequestObserver {
  * delivery, or the request thread that called [emit].
  */
 internal class Observation(
-    // Bounded so a stalled consumer observer accumulates at most QUEUE_CAPACITY events instead of
-    // growing without limit; DiscardOldestPolicy keeps the newest telemetry under back-pressure,
-    // matching the documented degrade-don't-block posture instead of applying it only in emit().
+    // Bounded so a stalled consumer observer cannot grow the queue without limit;
+    // DiscardOldestPolicy keeps the newest telemetry under back-pressure.
     private val executor: ExecutorService = ThreadPoolExecutor(
         1, 1, 0L, TimeUnit.MILLISECONDS,
         ArrayBlockingQueue(QUEUE_CAPACITY),
@@ -99,8 +98,8 @@ internal class Observation(
                 perRequest?.let { dispatch(it, event) }
             }
         } catch (e: RejectedExecutionException) {
-            // Closed or momentarily saturated past the DiscardOldestPolicy's own retry; either
-            // way this event is lost, which is the documented degrade-don't-block posture.
+            // Closed, or saturated past DiscardOldestPolicy's own retry. Dropping the event
+            // is the documented posture: degrade, never block the caller.
         }
     }
 

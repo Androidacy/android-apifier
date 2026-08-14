@@ -190,10 +190,8 @@ internal class Pipeline(
             attempts(request, options, call, breaker, timeoutMs, deadlineAt, host)
         } catch (e: Throwable) {
             timeoutTask.cancel(false)
-            // The trust gate, the breaker, a surrender ahead of an attempt, and a cancel or
-            // timeout landing in backoff between attempts all end the call without ever reaching
-            // reportAttempt. terminalEventEmitted is only true when reportAttempt already covered
-            // this outcome, which keeps this from doubling that report.
+            // Several paths end a call without reaching reportAttempt: the trust gate, the
+            // breaker, and a cancel or timeout landing in backoff between attempts.
             if (e is IOException && !call.terminalEventEmitted) {
                 reportTerminalFailure(host, request.method, call, errorCodeOf(e), callStartNanos, options)
             }
@@ -276,13 +274,11 @@ internal class Pipeline(
                     throw surface(e, call, timeoutMs)
                 }
             }
-            // Reached only for an attempt that will be retried. Backoff runs outside the try/catch
-            // above so a cancel or timeout here escapes straight to execute()'s catch instead of
-            // being re-caught by the same clause and reported a second time against this attempt.
+            // Outside the try/catch above, so a cancel or timeout during backoff is not
+            // re-caught and reported a second time against this attempt.
             backoffSleep(backoff.calculateDelay(attempt), call, timeoutMs)
             attempt++
         }
-        // The last attempt takes neither retry branch, so the loop always returns or throws.
         error("retry loop ended without an outcome")
     }
 

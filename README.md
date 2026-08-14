@@ -12,9 +12,12 @@ HTTP and API networking library for Android, built directly on Cronet.
 - **Typed errors**: failures surface as `ApifierException` subtypes instead of a generic `IOException`
 - **Request observation**: per-client and per-call observers see outcome, timing and byte counts for every attempt
 - **Protected-domain trust check**: compares a configured host's system DNS answer against known-good public resolvers before the call runs
-- **Encrypted cookies**: public-suffix-scoped cookie jar backed by a pluggable, hardware-encrypted store
+- **Encrypted cookies**: public-suffix-scoped cookie jar backed by a pluggable store, AES-GCM
+  encrypted with an Android Keystore key (StrongBox or TEE where the device has one). A device
+  with no usable Keystore drops cookies instead of writing them in cleartext
 - **Streaming uploads**: multipart and single-file bodies stream from disk rather than loading into memory
-- **Retry and circuit breaker**: exponential backoff with per-host breakers
+- **Retry and circuit breaker**: exponential backoff with per-host breakers. Retries are off
+  until you raise `maxAttempts`; the breakers are on by default
 - **DSL configuration**: Kotlin DSL for building a `NetworkConfig`
 
 Cronet exposes no connection-pool controls and no separate connect/write timeouts, so the
