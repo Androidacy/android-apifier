@@ -394,6 +394,27 @@ class ObservationTest {
         assertEquals(0, transport.seenCount)
     }
 
+    /** Production change that fails this: dropping the builder-level default observer fallback on the terminal-failure path. */
+    @Test
+    fun circuitOpenReachesTheBuilderDefaultObserverWhenNoCallSetsOne() {
+        val transport = FakeTransport(listOf(step { ok(it) }))
+        val observation = Observation()
+        val breakers = BreakerRegistry(CircuitBreakerConfig(failureThreshold = 1))
+        breakers.forHost(HOST)?.recordFailure()
+        val default = recordingObserver()
+        val pipeline = pipelineOf(transport, config().copy(defaultObserver = default.first), observation, breakers = breakers)
+
+        val thrown = runCatching {
+            pipeline.executeBlocking(request(), CallOptions(), PipelineCall())
+        }.exceptionOrNull()
+        val seen = awaitEvents(default.second, 1)
+
+        assertTrue(thrown is ApifierException.CircuitOpen)
+        assertEquals(1, seen.size)
+        assertEquals(ErrorCode.CIRCUIT_OPEN, seen[0].errorCode)
+        assertEquals(0, transport.seenCount)
+    }
+
     /** Production change that fails this: the trust gate's throw never reaching execute()'s catch-all. */
     @Test
     fun dnsUntrustedReachesPerRequestObserver() {
