@@ -25,9 +25,9 @@ import kotlinx.coroutines.runBlocking
 /**
  * [CookieStorage] backed by Jetpack DataStore Preferences.
  *
- * Bridges DataStore's async API to the synchronous [CookieStorage] contract
- * using [runBlocking]. OkHttp calls cookie methods from its own IO threads,
- * so this is safe as long as the client isn't built on the main thread.
+ * Bridges DataStore's async API to the synchronous [CookieStorage] contract using [runBlocking].
+ * The pipeline reads and writes cookies on its own worker threads, so this is safe as long as the
+ * client is not built on the main thread.
  *
  * Requires `androidx.datastore:datastore-preferences` on the consumer's classpath.
  */

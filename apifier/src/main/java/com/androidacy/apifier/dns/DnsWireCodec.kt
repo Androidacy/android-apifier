@@ -32,7 +32,7 @@ class DnsParseException(val kind: Kind, message: String) : IOException(message) 
 }
 
 /** RFC 1035 wire format with EDNS0 (RFC 6891) and padding (RFC 8467). */
-object DnsWireCodec {
+internal object DnsWireCodec {
 
     const val TYPE_A = 1
     const val TYPE_AAAA = 28

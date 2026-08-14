@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicReference
  * advances a request through read() or cancel(), so a request whose body is abandoned stays
  * paused for the engine's lifetime unless something cancels it.
  */
-class BodyPipe(readTimeoutMs: Long, private val onAbort: () -> Unit) {
+internal class BodyPipe(readTimeoutMs: Long, private val onAbort: () -> Unit) {
 
     private companion object {
         const val PIPE_BUFFER_SIZE = 256L * 1024

@@ -38,7 +38,7 @@ enum class TrustStatus { UNKNOWN, OK, FAIL, ERROR }
  * Verdicts are computed on [executor] and read back through [status]; no log line carries any
  * part of the contract, since release builds strip logging.
  */
-class ProtectedDomainCheck(
+class ProtectedDomainCheck internal constructor(
     protectedDomains: List<String>,
     private val resolvers: List<TrustedResolver>,
     private val systemResolve: (String) -> List<String>,

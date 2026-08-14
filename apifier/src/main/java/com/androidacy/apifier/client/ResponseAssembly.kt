@@ -22,7 +22,7 @@ import com.androidacy.apifier.http.Protocol
  *
  * Pure and transport-free so it can be tested without an engine.
  */
-object ResponseAssembly {
+internal object ResponseAssembly {
 
     private val ENCODINGS_HANDLED_BY_CRONET = setOf("br", "deflate", "gzip", "x-gzip", "zstd")
 

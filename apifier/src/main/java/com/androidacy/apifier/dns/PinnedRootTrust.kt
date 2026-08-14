@@ -38,7 +38,7 @@ import javax.net.ssl.X509TrustManager
  * constructor, because a check that quietly degrades to the platform trust store would report
  * trust it never established.
  */
-class PinnedRootTrust(roots: List<X509Certificate>) {
+internal class PinnedRootTrust(roots: List<X509Certificate>) {
 
     /**
      * True once the current thread has rejected a certificate for the connection it is driving,

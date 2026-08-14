@@ -36,7 +36,7 @@ class ResolverUnavailableException(message: String, cause: Throwable?) : IOExcep
  * the verdict this resolver feeds gates that path, and routing the check through it would let
  * the gate wait on itself.
  */
-open class TrustedResolver(
+internal open class TrustedResolver(
     val name: String,
     private val endpoint: String,
     private val trust: PinnedRootTrust,

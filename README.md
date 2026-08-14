@@ -46,6 +46,8 @@ API documentation is available at [javadoc.jitpack.io](https://javadoc.jitpack.i
 ## Usage
 
 ```kotlin
+import kotlin.time.Duration.Companion.seconds
+
 val client = ApifierClient(context) {
     cronet {
         enableQuic = true
@@ -86,6 +88,40 @@ client.close()
 
 Construction blocks: selecting a Cronet provider can reach Google Play services and wait on a
 Dynamite download, so build the client on a background thread.
+
+## Observation
+
+Observers see one event per attempt: outcome, error code, response code, elapsed and
+time-to-first-byte, bytes sent and received, host, method, attempt number, serving provider, and
+whether a retry follows. A client-wide observer sees every call; a per-call observer passed
+through `CallOptions` sees exactly one event, the attempt that ended its call.
+
+```kotlin
+client.addObserver { event -> log("${event.method} ${event.host} -> ${event.outcome}") }
+
+val call = client.call(request, CallOptions(maxAttempts = 1, observer = { report(it) }))
+```
+
+## Protected Domains
+
+For each configured host, apifier asks known-good public resolvers what the name resolves to and
+compares that against the system resolver's answer. A host whose answers disagree, or that a
+resolver could not be reached over a pinned-root connection, reports through
+`protectedDomainStatus`; with enforcement on, a `FAIL` verdict refuses the call with
+`ApifierException.DnsUntrusted`. Verdicts keep computing whether or not enforcement is on.
+
+```kotlin
+if (client.protectedDomainStatus("api.example.com") == TrustStatus.FAIL) warnUser()
+client.setEnforceProtectedDomains(false)
+```
+
+## Errors
+
+Every failure that reaches a callback or a blocking `execute()` is an `ApifierException`:
+`Transport` for a Cronet network failure, `CircuitOpen`, `Cancelled`, `CallTimeout`,
+`RedirectRefused`, `DnsUntrusted`, and `Unexpected` for anything the pipeline does not model,
+which carries the original throwable as its cause. Each one reports an `ErrorCode` and whether it
+is retryable.
 
 ## Cookie Storage
 
@@ -150,6 +186,22 @@ library does not override them:
 
 Cookies are stored encrypted with a hardware-backed AES-GCM key when a `CookieStorage`
 backend is configured.
+
+## Migrating to 3.0.0
+
+- Callbacks run on the client's worker pool, and the body handed to `onResponse` is still
+  streaming when the callback fires. Post to your own handler before touching the UI, read or
+  close the body, and do not treat the callback returning as the end of the call: the client stays
+  active until the body ends.
+- `ProgressListener.update` takes a `ProgressDirection` and its first parameter is now
+  `bytesTransferred`. A request that both sends a body and reads one reports each half separately,
+  so a listener that assumed a single count to `done` sees two.
+- Failures arrive as `ApifierException` subtypes. Code matching on the old flat
+  `IOException("Cronet request failed")` message needs to switch on `errorCode` instead.
+- `ApifierClient` is `Closeable` and owns an engine, thread pools and a network callback. Call
+  `close()` when you are done with it.
+- DoH resolution and the OkHttp interceptor are gone. Configure TLS trust through your app's
+  Network Security Configuration, and protected-domain checking through `protectedDomains(...)`.
 
 ## Requirements
 
