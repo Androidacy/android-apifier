@@ -19,7 +19,7 @@ import kotlin.math.pow
 import kotlin.random.Random
 
 /** Tuning parameters for [ExponentialBackoff]. */
-data class BackoffConfig(
+internal data class BackoffConfig(
     val maxAttempts: Int = 5,
     val baseDelayMs: Long = 1000L,
     val maxDelayMs: Long = 30_000L,
@@ -36,7 +36,7 @@ data class BackoffConfig(
 }
 
 /** Computes exponential backoff delays with jitter. */
-class ExponentialBackoff(private val config: BackoffConfig = BackoffConfig()) {
+internal class ExponentialBackoff(private val config: BackoffConfig = BackoffConfig()) {
 
     /**
      * @param attemptNumber zero-based attempt index

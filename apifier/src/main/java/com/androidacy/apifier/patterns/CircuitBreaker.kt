@@ -20,7 +20,7 @@ package com.androidacy.apifier.patterns
  * @param failureThreshold consecutive failures before opening
  * @param timeoutMs millis before transitioning open to half-open
  */
-class CircuitBreaker(
+internal class CircuitBreaker(
     private val failureThreshold: Int = 5,
     private val timeoutMs: Long = 300_000L
 ) {
