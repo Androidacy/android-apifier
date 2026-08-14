@@ -38,9 +38,11 @@ import com.androidacy.apifier.patterns.ExponentialBackoff
 import com.androidacy.apifier.progress.Progress
 import com.androidacy.apifier.security.PublicSuffixList
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import okio.Buffer
 import okio.BufferedSource
 import okio.ForwardingSource
@@ -258,10 +260,14 @@ internal class Pipeline(
      * [ProtectedDomainCheck.shouldBlock] already answers false when enforcement is off, so it
      * is always consulted here; only the wait is worth skipping.
      */
-    private fun gateTrust(host: String, deadlineAt: Long) {
+    private suspend fun gateTrust(host: String, deadlineAt: Long) {
         val check = trustCheck ?: return
         val budget = (deadlineAt - System.currentTimeMillis()).coerceAtMost(TRUST_VERDICT_WAIT_MS)
-        if (check.enforcing && budget > 0) check.awaitVerdict(host, budget)
+        // The wait parks its thread for up to TRUST_VERDICT_WAIT_MS, which the caller's own
+        // dispatcher may not have to spare.
+        if (check.enforcing && budget > 0) {
+            withContext(Dispatchers.IO) { check.awaitVerdict(host, budget) }
+        }
         if (check.shouldBlock(host)) throw ApifierException.DnsUntrusted(host)
     }
 
@@ -327,7 +333,7 @@ internal class Pipeline(
     }
 
     /** Builds the request the transport will see: global headers first, then jar cookies. */
-    private fun prepare(request: Request, options: CallOptions): Request {
+    private suspend fun prepare(request: Request, options: CallOptions): Request {
         val builder = request.newBuilder()
         applyGlobalHeaders(request, builder)
         attachCookies(request, builder)
@@ -345,9 +351,11 @@ internal class Pipeline(
         }
     }
 
-    private fun attachCookies(request: Request, builder: Request.Builder) {
+    // CookieJar is a synchronous SPI over storage the consumer chose: a read can reach a disk.
+    private suspend fun attachCookies(request: Request, builder: Request.Builder) {
         if (request.header("Cookie") != null) return
-        val cookies = cookieJar?.loadForRequest(request.uri).orEmpty()
+        val jar = cookieJar ?: return
+        val cookies = withContext(Dispatchers.IO) { jar.loadForRequest(request.uri) }
         if (cookies.isEmpty()) return
         builder.header("Cookie", cookies.joinToString("; ") { "${it.name}=${it.value}" })
     }
@@ -383,11 +391,15 @@ internal class Pipeline(
         if (call.isCanceled) transportCall.cancel()
 
         val response = transportCall.await()
-        saveCookies(answeredBy.get(), response.headers)
+        withContext(Dispatchers.IO) { saveCookies(answeredBy.get(), response.headers) }
         return response
     }
 
-    /** Runs for every response the transport hands over, including ones the retry loop discards. */
+    /**
+     * Runs for every response the transport hands over, including ones the retry loop discards.
+     * The redirect path calls this from the transport's own callback thread, which is never the
+     * caller's, so only the response path hops off it.
+     */
     private fun saveCookies(uri: Uri, headers: Headers) {
         val jar = cookieJar ?: return
         val psl = publicSuffixList ?: return

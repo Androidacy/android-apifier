@@ -30,7 +30,16 @@ import com.androidacy.apifier.observe.Outcome
 import com.androidacy.apifier.observe.RequestEvent
 import com.androidacy.apifier.observe.RequestObserver
 import com.androidacy.apifier.progress.Progress
+import com.androidacy.apifier.security.CookieStorage
+import com.androidacy.apifier.security.InMemoryCookieStorage
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExecutorCoroutineDispatcher
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.chromium.net.CronetProvider
 import org.junit.Assert.assertEquals
@@ -44,15 +53,20 @@ import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.shadows.ShadowLog
+import java.io.Closeable
 import java.io.IOException
 import java.net.ServerSocket
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlin.coroutines.resumeWithException
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 @RunWith(RobolectricTestRunner::class)
 class ApifierClientTest {
@@ -381,6 +395,258 @@ class ApifierClientTest {
         client.close()
     }
 
+    @Test
+    fun sendIsSafeToCallFromTheMainDispatcher() {
+        val storage = GatedCookieStorage()
+        val client = clientOf(FakeEngine(), NetworkConfig(cookieStorage = storage))
+        val dispatcher = singleThreadDispatcher()
+        val scope = CoroutineScope(dispatcher)
+        val sent = CountDownLatch(1)
+
+        scope.launch {
+            client.get(URL).close()
+            sent.countDown()
+        }
+        assertTrue("the cookie read was never reached", storage.entered.await(10, TimeUnit.SECONDS))
+        val marker = CountDownLatch(1)
+        scope.launch { marker.countDown() }
+
+        assertTrue(
+            "the cookie read parked the calling dispatcher",
+            marker.await(10, TimeUnit.SECONDS)
+        )
+        storage.release()
+        assertTrue(sent.await(10, TimeUnit.SECONDS))
+        dispatcher.close()
+        client.close()
+    }
+
+    @Test
+    fun cancellingTheCallerCancelsTheRequest() {
+        val engine = FakeEngine(hang = true)
+        val client = clientOf(engine)
+        val outcome = AtomicReference<Throwable?>()
+        val done = CountDownLatch(1)
+        val job = CoroutineScope(Dispatchers.IO).launch {
+            try {
+                client.send(getRequest()).close()
+            } catch (e: Throwable) {
+                outcome.set(e)
+            } finally {
+                done.countDown()
+            }
+        }
+        assertTrue(engine.started.await(10, TimeUnit.SECONDS))
+
+        job.cancel()
+
+        assertTrue(done.await(10, TimeUnit.SECONDS))
+        assertTrue("got ${outcome.get()}", outcome.get() is CancellationException)
+        assertEquals(listOf("cancel"), engine.log)
+        client.close()
+    }
+
+    @Test
+    fun closeCancelsInFlightSuspendCalls() {
+        val engine = FakeEngine(hang = true)
+        val client = clientOf(engine)
+        val outcome = AtomicReference<Throwable?>()
+        val done = CountDownLatch(1)
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                client.send(getRequest()).close()
+            } catch (e: Throwable) {
+                outcome.set(e)
+            } finally {
+                done.countDown()
+            }
+        }
+        assertTrue(engine.started.await(10, TimeUnit.SECONDS))
+
+        client.close()
+
+        assertTrue("the suspended call was never reached", done.await(10, TimeUnit.SECONDS))
+        assertTrue("got ${outcome.get()}", outcome.get() is ApifierException.Cancelled)
+        assertEquals(listOf("cancel", "shutdown"), engine.log)
+    }
+
+    @Test
+    fun closeCancelsACallStillStreamingItsBody() {
+        val engine = FakeEngine()
+        val client = clientOf(engine)
+        val response = runBlocking { client.send(getRequest()) }
+        // The drain outlasts the body, so the body has to end for close to return; it ends once
+        // close has had its chance to reach the call.
+        val closer = thread(isDaemon = true) {
+            val deadline = System.currentTimeMillis() + 10_000
+            while ("cancel" !in engine.log && System.currentTimeMillis() < deadline) {
+                Thread.sleep(5)
+            }
+            response.close()
+        }
+
+        client.close()
+        closer.join(10_000)
+
+        assertEquals(listOf("cancel", "shutdown"), engine.log)
+    }
+
+    @Test
+    fun facadeHelpersBuildEquivalentRequests() {
+        val engine = FakeEngine()
+        val client = clientOf(engine)
+        val file = temporaryFolder.newFile("payload.bin").apply { writeBytes(ByteArray(4)) }
+        val progress = MutableSharedFlow<Progress>(extraBufferCapacity = 8)
+
+        runBlocking {
+            client.get(URL).close()
+            client.post(URL, "{}").close()
+            client.delete(URL).close()
+            client.head(URL).close()
+            client.progress(progress).download(URL).close()
+            client.progress(progress).upload(URL, listOf(file), listOf("field")).close()
+        }
+        client.close()
+
+        val seen = engine.seen.associateBy { request ->
+            request.method + if (request.tag(ProgressSink::class.java) == null) "" else "+p"
+        }
+        assertEquals(setOf("GET", "POST", "DELETE", "HEAD", "GET+p", "POST+p"), seen.keys)
+        assertEquals("application/json", seen.getValue("POST").body?.contentType()?.toString())
+        assertNull(seen.getValue("GET").body)
+        assertTrue(
+            seen.getValue("POST+p").body?.contentType()?.toString().orEmpty()
+                .startsWith("multipart/form-data")
+        )
+    }
+
+    @Test
+    fun sendAfterCloseFails() {
+        val client = clientOf(FakeEngine())
+        client.close()
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { client.send(getRequest()) }
+        }
+    }
+
+    @Test
+    fun derivedViewOverridesOnlyWhatItSets() {
+        val retrying = FakeEngine(respond = { serverError(it) })
+        val client = clientOf(retrying)
+
+        val response = runBlocking { client.maxAttempts(3).get(URL) }
+        response.close()
+        assertEquals(3, retrying.seen.size)
+        client.close()
+
+        val hanging = FakeEngine(hang = true)
+        val timingOut = clientOf(hanging, NetworkConfig(timeouts = TimeoutConfig(call = 200.milliseconds)))
+
+        val thrown = assertThrows(ApifierException.CallTimeout::class.java) {
+            runBlocking { timingOut.maxAttempts(3).get(URL) }
+        }
+
+        assertEquals("the client's own call timeout was discarded", 200L, thrown.timeoutMillis)
+        timingOut.close()
+    }
+
+    @Test
+    fun derivedViewDoesNotAffectTheParent() {
+        val engine = FakeEngine(respond = { serverError(it) })
+        val client = clientOf(engine)
+
+        client.maxAttempts(3)
+        runBlocking { client.get(URL).close() }
+
+        assertEquals(1, engine.seen.size)
+        client.close()
+    }
+
+    @Test
+    fun derivedViewsChainCumulatively() {
+        val engine = FakeEngine(respond = { serverError(it) })
+        // A call timeout no derived view could survive, so an attempt ceiling that arrives
+        // without the timeout beside it ends the call instead of retrying.
+        val client = clientOf(engine, NetworkConfig(timeouts = TimeoutConfig(call = 1.milliseconds)))
+
+        val response = runBlocking { client.maxAttempts(3).timeout(20.seconds).get(URL) }
+
+        assertEquals(500, response.code)
+        assertEquals(3, engine.seen.size)
+        response.close()
+        client.close()
+    }
+
+    @Test
+    fun derivedViewSharesTheParentEngineAndJar() {
+        val engine = FakeEngine()
+        val storage = GatedCookieStorage().apply { release() }
+        val client = clientOf(engine, NetworkConfig(cookieStorage = storage))
+
+        runBlocking { client.maxAttempts(1).get(URL).close() }
+
+        assertEquals("the call never reached the client's engine", 1, engine.seen.size)
+        assertTrue("the client's cookie jar was bypassed", storage.reads.get() > 0)
+        client.close()
+    }
+
+    @Test
+    fun derivedViewHasNoClose() {
+        val client = clientOf(FakeEngine())
+
+        val derived: Requester = client.maxAttempts(3)
+
+        assertFalse("a derived view can shut the shared engine down", derived is Closeable)
+        client.close()
+    }
+
+    @Test
+    fun javaTimeoutOverloadMatchesTheDurationForm() {
+        val client = clientOf(FakeEngine(hang = true))
+
+        val fromUnit = assertThrows(ApifierException.CallTimeout::class.java) {
+            runBlocking { client.timeout(500, TimeUnit.MILLISECONDS).get(URL) }
+        }
+        val fromDuration = assertThrows(ApifierException.CallTimeout::class.java) {
+            runBlocking { client.timeout(500.milliseconds).get(URL) }
+        }
+
+        assertEquals(fromDuration.timeoutMillis, fromUnit.timeoutMillis)
+        assertEquals(500L, fromUnit.timeoutMillis)
+        client.close()
+    }
+
+    private fun getRequest(): Request = Request.Builder().url(URL).get().build()
+
+    private fun singleThreadDispatcher(): ExecutorCoroutineDispatcher =
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "main-like").apply { isDaemon = true }
+        }.asCoroutineDispatcher()
+
+    /** Stands in for a [CookieStorage] whose reads reach a disk or a keystore. */
+    private class GatedCookieStorage : CookieStorage {
+
+        val entered = CountDownLatch(1)
+        val reads = AtomicInteger()
+
+        private val proceed = CountDownLatch(1)
+        private val delegate = InMemoryCookieStorage()
+
+        fun release() = proceed.countDown()
+
+        override fun getStringSet(key: String, defaultValue: Set<String>?): Set<String>? {
+            reads.incrementAndGet()
+            entered.countDown()
+            proceed.await(10, TimeUnit.SECONDS)
+            return delegate.getStringSet(key, defaultValue)
+        }
+
+        override fun putStringSet(key: String, value: Set<String>) = delegate.putStringSet(key, value)
+
+        override fun remove(key: String) = delegate.remove(key)
+    }
+
     private fun clientOf(engine: FakeEngine, config: NetworkConfig = NetworkConfig()) =
         ApifierClient(context, config, engine)
 
@@ -395,12 +661,16 @@ class ApifierClientTest {
 
     private fun serverError(request: Request): Response = response(request, 500)
 
-    private fun response(request: Request, code: Int = 200): Response = Response.Builder()
+    private fun response(
+        request: Request,
+        code: Int = 200,
+        headers: Headers = Headers.headersOf()
+    ): Response = Response.Builder()
         .request(request)
         .protocol(Protocol.HTTP_2)
         .code(code)
         .message("")
-        .headers(Headers.headersOf())
+        .headers(headers)
         .body(ByteArray(0).toResponseBody(null))
         .build()
 

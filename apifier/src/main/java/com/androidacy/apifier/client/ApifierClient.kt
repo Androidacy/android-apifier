@@ -37,8 +37,16 @@ import com.androidacy.apifier.observe.RequestObserver
 import com.androidacy.apifier.progress.Progress
 import com.androidacy.apifier.security.PublicSuffixList
 import com.androidacy.apifier.security.SecureCookieJar
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.launch
 import org.chromium.net.CronetEngine
 import java.io.Closeable
 import java.io.File
@@ -46,10 +54,9 @@ import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.time.Duration
 
 /** Tag marker to skip automatic retries on a per-request basis. */
 object NoRetry
@@ -129,8 +136,8 @@ internal class CronetClientEngine(
  * HTTP client backed by Cronet.
  *
  * Every call runs through one pipeline: call timeout, protected-domain gate, circuit breaker,
- * retry, headers, cookies, progress. [call] is the entry point and the request-shaped helpers
- * are sugar over it.
+ * retry, headers, cookies, progress. [Requester.send] is the entry point and the request-shaped
+ * helpers are sugar over it.
  *
  * Construction blocks. Selecting a Cronet provider reaches Google Play services, which can wait
  * on a Dynamite download, so build the client on a background thread.
@@ -145,24 +152,22 @@ class ApifierClient internal constructor(
     context: Context,
     config: NetworkConfig,
     private val engine: ClientEngine
-) : Closeable {
+) : Requester, Closeable {
 
     constructor(context: Context, config: NetworkConfig) :
         this(context, config, CronetClientEngine.build(context, config))
 
     private val appContext = context.applicationContext
 
-    private val workers: ExecutorService = Executors.newCachedThreadPool { runnable ->
-        Thread(runnable, "Apifier-Call").apply { isDaemon = true }
-    }
+    // Owns the deprecated enqueue bridge, whose callers have no coroutine of their own.
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val scheduler: ScheduledExecutorService =
         Executors.newSingleThreadScheduledExecutor { runnable ->
             Thread(runnable, "Apifier-Timeout").apply { isDaemon = true }
         }
 
-    // DNS probes are blocking and unrelated to any one call, so they get their own thread rather
-    // than occupying a worker that a call is waiting for.
+    // DNS probes block and belong to no one call, so they get a thread of their own.
     private val trustExecutor: ExecutorService? =
         if (config.protectedDomains.isEmpty()) {
             null
@@ -207,7 +212,7 @@ class ApifierClient internal constructor(
         )
     }
 
-    private val inFlight = ConcurrentHashMap.newKeySet<ClientCall>()
+    private val inFlight = ConcurrentHashMap.newKeySet<PipelineCall>()
 
     private val closed = AtomicBoolean(false)
 
@@ -219,9 +224,46 @@ class ApifierClient internal constructor(
      */
     val providerReport: Map<String, String> get() = engine.providerReport
 
+    override suspend fun send(request: Request): Response = send(request, CallOptions())
+
+    override fun maxAttempts(count: Int): Requester =
+        DerivedRequester(this, CallOptions(maxAttempts = count))
+
+    override fun timeout(duration: Duration): Requester =
+        DerivedRequester(this, CallOptions(callTimeoutMillis = duration.inWholeMilliseconds))
+
+    override fun progress(sink: MutableSharedFlow<Progress>): Requester =
+        DerivedRequester(this, CallOptions(progress = sink))
+
+    @Suppress("DEPRECATION")
+    override fun observe(observer: RequestObserver): Requester =
+        DerivedRequester(this, CallOptions(observer = observer))
+
     /**
-     * Prepares [request] for execution. The returned [Call] runs the whole pipeline once, on the
-     * client's worker pool for [Call.enqueue] and on the calling thread for [Call.execute].
+     * The call every [Requester] on this client ends up in. The call counts as in flight until
+     * the pipeline fails or its response body ends, which is what [close] has to reach: the
+     * engine stays active for as long as a body is streaming.
+     */
+    internal suspend fun send(request: Request, options: CallOptions): Response {
+        check(!closed.get()) { CLOSED_MESSAGE }
+        val effective =
+            if (request.tag(NoRetry::class.java) == null) options else options.copy(maxAttempts = 1)
+        val state = PipelineCall()
+        state.onBodyFinished = { inFlight.remove(state) }
+        inFlight.add(state)
+        return try {
+            pipeline.execute(request, effective, state)
+        } catch (e: Throwable) {
+            inFlight.remove(state)
+            // A cancelled caller must get a cancellation back; an IOException here would let
+            // the coroutine it was cancelled with carry on.
+            throw if (e is CancellationException) e else asDeclaredFailure(e)
+        }
+    }
+
+    /**
+     * Prepares [request] for execution. The returned [Call] runs the whole pipeline once, on a
+     * coroutine of the client's for [Call.enqueue] and on the calling thread for [Call.execute].
      *
      * A request marked with [noRetry] is limited to one attempt whatever [options] asks for.
      *
@@ -335,6 +377,7 @@ class ApifierClient internal constructor(
             networkCallback?.let { callback -> connectivity?.unregisterNetworkCallback(callback) }
         }
         teardown { inFlight.forEach { it.cancel() } }
+        teardown { scope.cancel() }
         // Ahead of the drain, since this releases a call parked on a verdict that is never
         // coming; waiting for it would spend the whole trust budget inside close.
         teardown { trustCheck?.shutdown() }
@@ -352,19 +395,13 @@ class ApifierClient internal constructor(
     }
 
     private fun drainCalls() {
-        workers.shutdown()
         val deadline = System.currentTimeMillis() + DRAIN_TIMEOUT_MS
         try {
-            // awaitTermination alone would miss a call running on a caller's thread through
-            // execute(), which is in flight without occupying a worker.
             while (inFlight.isNotEmpty() && System.currentTimeMillis() < deadline) {
                 Thread.sleep(DRAIN_POLL_MS)
             }
-            val remaining = (deadline - System.currentTimeMillis()).coerceAtLeast(0)
-            if (!workers.awaitTermination(remaining, TimeUnit.MILLISECONDS)) workers.shutdownNow()
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
-            workers.shutdownNow()
         }
     }
 
@@ -386,19 +423,17 @@ class ApifierClient internal constructor(
         private val started = AtomicBoolean(false)
 
         init {
-            state.onBodyFinished = { inFlight.remove(this) }
+            state.onBodyFinished = { inFlight.remove(state) }
         }
 
         override fun request(): Request = request
 
+        @OptIn(DelicateCoroutinesApi::class)
         override fun enqueue(callback: Callback) {
             begin()
-            try {
-                workers.execute { run(callback) }
-            } catch (e: RejectedExecutionException) {
-                inFlight.remove(this)
-                callback.onFailure(this, ApifierException.Cancelled())
-            }
+            // ATOMIC because the consumer is owed exactly one terminal callback: a launch that
+            // loses the race with close() would otherwise never run and never call back.
+            scope.launch(start = CoroutineStart.ATOMIC) { run(callback) }
         }
 
         @Deprecated("Blocking bridge over the async path; prefer enqueue.")
@@ -410,7 +445,7 @@ class ApifierClient internal constructor(
             try {
                 return pipeline.executeBlocking(request, options, state)
             } catch (e: Throwable) {
-                inFlight.remove(this)
+                inFlight.remove(state)
                 throw asDeclaredFailure(e)
             }
         }
@@ -422,14 +457,14 @@ class ApifierClient internal constructor(
         private fun begin() {
             check(started.compareAndSet(false, true)) { "Call already enqueued" }
             check(!closed.get()) { CLOSED_MESSAGE }
-            inFlight.add(this)
+            inFlight.add(state)
         }
 
-        private fun run(callback: Callback) {
+        private suspend fun run(callback: Callback) {
             val response = try {
-                pipeline.executeBlocking(request, options, state)
+                pipeline.execute(request, options, state)
             } catch (e: Throwable) {
-                inFlight.remove(this)
+                inFlight.remove(state)
                 // The consumer is owed exactly one terminal callback. An interrupt during a
                 // shutdown, or any other non-IO failure, must not leave it waiting forever.
                 dispatch { callback.onFailure(this, asDeclaredFailure(e)) }
@@ -455,12 +490,43 @@ class ApifierClient internal constructor(
         private const val DRAIN_POLL_MS = 10L
         private const val CLOSED_MESSAGE = "client is closed"
 
-        private fun asDeclaredFailure(e: Throwable): IOException =
-            e as? ApifierException ?: ApifierException.Unexpected(e)
+        private fun asDeclaredFailure(e: Throwable): IOException = when (e) {
+            is ApifierException -> e
+            // A callback consumer has no coroutine to be cancelled with, so a cancellation
+            // has to reach it as a failure.
+            is CancellationException -> ApifierException.Cancelled()
+            else -> ApifierException.Unexpected(e)
+        }
 
         operator fun invoke(context: Context, block: NetworkConfigBuilder.() -> Unit): ApifierClient {
             val config = NetworkConfigBuilder().apply(block).build()
             return ApifierClient(context, config)
         }
     }
+}
+
+/**
+ * A view of [client] carrying one call's [options]. Engine, pipeline, cookie jar, breakers and
+ * scope stay the client's, so a view is cheap enough to build for one call.
+ */
+private class DerivedRequester(
+    private val client: ApifierClient,
+    private val options: CallOptions
+) : Requester {
+
+    override suspend fun send(request: Request): Response = client.send(request, options)
+
+    override fun maxAttempts(count: Int): Requester = derive(options.copy(maxAttempts = count))
+
+    override fun timeout(duration: Duration): Requester =
+        derive(options.copy(callTimeoutMillis = duration.inWholeMilliseconds))
+
+    override fun progress(sink: MutableSharedFlow<Progress>): Requester =
+        derive(options.copy(progress = sink))
+
+    @Suppress("DEPRECATION")
+    override fun observe(observer: RequestObserver): Requester =
+        derive(options.copy(observer = observer))
+
+    private fun derive(options: CallOptions) = DerivedRequester(client, options)
 }

@@ -301,6 +301,35 @@ class PipelineTest {
         }
     }
 
+    /**
+     * The verdict wait releases itself after two seconds, so a dispatcher parked on it is only
+     * distinguishable from a free one inside that window.
+     */
+    @Test
+    fun trustWaitDoesNotBlockTheCallingThread() {
+        val transport = FakeTransport(listOf(step { ok(it) }))
+        val pending = pendingTrustCheck()
+        val pipeline = pipelineOf(transport, config(), trustCheck = pending)
+        val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        val scope = CoroutineScope(dispatcher)
+        val done = CountDownLatch(1)
+
+        scope.launch {
+            pipeline.execute(request().build(), CallOptions(), PipelineCall()).close()
+            done.countDown()
+        }
+        val marker = CountDownLatch(1)
+        scope.launch { marker.countDown() }
+
+        assertTrue(
+            "the trust wait parked the calling dispatcher",
+            marker.await(1, TimeUnit.SECONDS)
+        )
+        pending.shutdown()
+        assertTrue(done.await(10, TimeUnit.SECONDS))
+        dispatcher.close()
+    }
+
     @Test
     fun circuitOpenShortCircuits() {
         val transport = FakeTransport(listOf(step { ok(it) }))
@@ -761,6 +790,10 @@ class PipelineTest {
         return ProtectedDomainCheck(listOf(HOST), resolvers, { listOf("1.1.1.1") }, { it.run() })
             .apply { start() }
     }
+
+    /** No verdict ever arrives: the probe executor drops the work it is handed. */
+    private fun pendingTrustCheck(): ProtectedDomainCheck =
+        ProtectedDomainCheck(listOf(HOST), emptyList(), { emptyList() }, { }).apply { start() }
 
     /** A body that only ends when the transport is cancelled, the way [BodyPipe] behaves. */
     private fun slowBodyStep() = Step(0) { request, _, cancelSignal ->

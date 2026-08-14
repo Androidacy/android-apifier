@@ -65,7 +65,7 @@ dependencies {
     api("org.chromium.net:cronet:500.0.1")
     implementation("org.chromium.net:cronet-bundled:500.0.1")
 
-    // Kotlin coroutines
+    // Kotlin coroutines: api, since Requester is suspending and CallOptions.progress is a Flow
     api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
 
     // AndroidX
