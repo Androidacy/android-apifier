@@ -152,10 +152,9 @@ class ProtectedDomainCheck internal constructor(
             val verdict = try {
                 evaluate(host)
             } catch (e: Throwable) {
-                // Anything escaping here is swallowed by the executor, and the host would then sit
-                // at UNKNOWN for the life of the process with nothing recording why. A crash on our
-                // side is a failure to check, which is what ERROR means; it is not evidence about
-                // the answer, which is what FAIL would claim.
+                // Anything escaping here is swallowed by the executor, leaving the host at UNKNOWN
+                // for the life of the process with nothing recording why. ERROR covers a failure to
+                // check; FAIL would assert evidence about the answer that a crash here cannot carry.
                 TrustStatus.ERROR
             } finally {
                 state.running.set(false)

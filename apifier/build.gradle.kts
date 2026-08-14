@@ -71,7 +71,7 @@ dependencies {
     // AndroidX
     implementation("androidx.core:core-ktx:1.19.0")
 
-    // DataStore (optional — only needed if using DataStoreCookieStorage)
+    // DataStore: only needed by consumers using DataStoreCookieStorage
     compileOnly("androidx.datastore:datastore-preferences:1.2.1")
 
     // Tests

@@ -91,8 +91,8 @@ internal interface TransportListener {
     fun onRedirect(hopUri: Uri, hopHeaders: Headers)
 
     /**
-     * [effectiveUri] is the URL that answered, so after a redirect it is the target rather than
-     * the URL the request was addressed to. The response's `Set-Cookie` headers are scoped to it.
+     * [effectiveUri] is the URL that answered. After a redirect that is the target, not the URL
+     * the request was addressed to, and the response's `Set-Cookie` headers are scoped to it.
      */
     fun onResponseStarted(ttfbMillis: Long, effectiveUri: Uri)
 

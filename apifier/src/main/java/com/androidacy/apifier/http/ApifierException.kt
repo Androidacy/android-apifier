@@ -89,8 +89,8 @@ sealed class ApifierException(message: String, cause: Throwable? = null) : IOExc
 
     /**
      * A failure the pipeline does not model, carried in [cause]. Consumers are promised this
-     * hierarchy for every failure, so a raw throwable is retyped here rather than reaching them
-     * as something a `catch (IOException)` or an `is ApifierException` check would miss.
+     * hierarchy for every failure, and a raw throwable would otherwise reach them as something a
+     * `catch (IOException)` or an `is ApifierException` check misses.
      */
     class Unexpected(cause: Throwable) : ApifierException(cause.toString(), cause) {
         override val errorCode: ErrorCode = ErrorCode.OTHER
