@@ -115,6 +115,24 @@ class TrustedResolverTest {
     }
 
     @Test
+    fun aFailingWhileAaaaAnswersNothingIsResolverUnavailable() {
+        val server = tlsServerByQueryType { query ->
+            if (queryTypeOf(query) == DnsWireCodec.TYPE_A) null else NO_RECORDS
+        }
+
+        assertThrows(ResolverUnavailableException::class.java) {
+            resolverFor(server.port).query("cloudflare.com")
+        }
+    }
+
+    @Test
+    fun bothQueriesAnsweringNothingIsAuthoritativeEmpty() {
+        val server = tlsServerByQueryType { NO_RECORDS }
+
+        assertEquals(emptyList<String>(), resolverFor(server.port).query("cloudflare.com").addresses)
+    }
+
+    @Test
     fun rejectionFlagIsClearedBetweenQueries() {
         val rejecting = tlsServer("dns/test_selfsigned.p12", "200 OK")
         assertThrows(CertificateRejectedException::class.java) {
@@ -163,6 +181,22 @@ class TrustedResolverTest {
         TlsServer(tlsServerSocket(keystore), Behavior.RESPOND, status, dnsResponse)
             .also { closeables += it }
 
+    private fun tlsServerByQueryType(bodyFor: (ByteArray) -> ByteArray?): TlsServer =
+        TlsServer(
+            tlsServerSocket("dns/test_leaf_covering_localhost.p12"),
+            Behavior.RESPOND,
+            "200 OK",
+            ByteArray(0),
+            bodyFor
+        ).also { closeables += it }
+
+    /** QTYPE sits right after the QNAME labels that follow the 12-byte header. */
+    private fun queryTypeOf(query: ByteArray): Int {
+        var offset = 12
+        while (query[offset].toInt() != 0) offset += 1 + (query[offset].toInt() and 0xFF)
+        return ((query[offset + 1].toInt() and 0xFF) shl 8) or (query[offset + 2].toInt() and 0xFF)
+    }
+
     private fun stallingTlsServer(keystore: String): TlsServer =
         TlsServer(tlsServerSocket(keystore), Behavior.CLOSE_AFTER_HANDSHAKE, "", ByteArray(0))
             .also { closeables += it }
@@ -192,7 +226,9 @@ class TrustedResolverTest {
         private val server: ServerSocket,
         private val behavior: Behavior,
         private val status: String,
-        private val body: ByteArray
+        private val body: ByteArray,
+        /** Null closes the connection after the handshake instead of answering. */
+        private val bodyFor: (ByteArray) -> ByteArray? = { body }
     ) : Closeable {
 
         val port: Int get() = server.localPort
@@ -225,19 +261,19 @@ class TrustedResolverTest {
         }
 
         private fun respond(socket: Socket) {
-            readRequest(socket.getInputStream())
+            val answer = bodyFor(readRequest(socket.getInputStream())) ?: return
             val header = "HTTP/1.1 $status\r\n" +
                 "Content-Type: application/dns-message\r\n" +
-                "Content-Length: ${body.size}\r\n" +
+                "Content-Length: ${answer.size}\r\n" +
                 "Connection: close\r\n\r\n"
             socket.getOutputStream().apply {
                 write(header.toByteArray(Charsets.US_ASCII))
-                write(body)
+                write(answer)
                 flush()
             }
         }
 
-        private fun readRequest(input: java.io.InputStream) {
+        private fun readRequest(input: java.io.InputStream): ByteArray {
             var contentLength = 0
             var line = readLine(input)
             while (line.isNotEmpty()) {
@@ -246,12 +282,14 @@ class TrustedResolverTest {
                 }
                 line = readLine(input)
             }
+            val payload = ByteArray(contentLength)
             var read = 0
             while (read < contentLength) {
-                val n = input.read(ByteArray(contentLength - read))
+                val n = input.read(payload, read, contentLength - read)
                 if (n < 0) break
                 read += n
             }
+            return payload.copyOf(read)
         }
 
         private fun readLine(input: java.io.InputStream): String {
@@ -268,5 +306,10 @@ class TrustedResolverTest {
         override fun close() {
             server.close()
         }
+    }
+
+    private companion object {
+        /** NOERROR, QR set, no question and no answer records. */
+        val NO_RECORDS = ByteArray(12).also { it[2] = 0x81.toByte() }
     }
 }

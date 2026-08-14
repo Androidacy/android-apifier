@@ -51,6 +51,10 @@ open class TrustedResolver(
      * A and AAAA merged. An authoritative NXDOMAIN comes back as an empty answer, because the
      * verdict layer counts "answered: nothing" as a usable response and would otherwise score
      * it as a resolver that could not answer.
+     *
+     * That only holds when both queries completed. An empty result with one query still failing
+     * is a resolver that could not answer, and reporting it as authoritative-empty would hand the
+     * verdict layer a usable response with zero overlap, which reads as interception.
      */
     open fun query(hostname: String): DnsAnswer {
         val outcomes = listOf(DnsWireCodec.TYPE_A, DnsWireCodec.TYPE_AAAA).map { type ->
@@ -65,16 +69,15 @@ open class TrustedResolver(
         }
 
         val answers = outcomes.mapNotNull { it.getOrNull() }
-        if (answers.isEmpty()) {
+        val addresses = answers.flatMap { it.addresses }.distinct()
+        val failure = outcomes.firstNotNullOfOrNull { it.exceptionOrNull() }
+        if (addresses.isEmpty() && failure != null) {
             recordFailure()
-            throw outcomes.first().exceptionOrNull() as IOException
+            throw failure as IOException
         }
 
         recordSuccess()
-        return DnsAnswer(
-            answers.flatMap { it.addresses }.distinct(),
-            answers.minOf { it.minTtlSeconds }
-        )
+        return DnsAnswer(addresses, answers.minOf { it.minTtlSeconds })
     }
 
     /** False while this resolver is in failure backoff, capped at [MAX_BACKOFF_MS]. */
