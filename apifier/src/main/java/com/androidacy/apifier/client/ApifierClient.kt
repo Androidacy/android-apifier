@@ -219,6 +219,9 @@ class ApifierClient internal constructor(
      */
     internal var beforeInFlightRegistration: (() -> Unit)? = null
 
+    /** Test-only seam: lets the test suite poll for a call reaching [inFlight] instead of guessing a wall-clock delay. */
+    internal fun hasInFlightCalls(): Boolean = inFlight.isNotEmpty()
+
     /**
      * Provider selection outcome in ladder order. Keys are `name:version`, values are the
      * `HttpClientBuilder.PROVIDER_*` statuses.

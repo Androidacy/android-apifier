@@ -408,10 +408,11 @@ class ApifierClientTest {
 
         val done = CountDownLatch(1)
         client.get("https://127.0.0.1:${server.localPort}/", countingCallback(done))
-        assertFalse(
-            "the call finished before close, so nothing was in flight",
-            done.await(500, TimeUnit.MILLISECONDS)
-        )
+        val inFlightDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (!client.hasInFlightCalls() && System.nanoTime() < inFlightDeadline) {
+            Thread.sleep(10)
+        }
+        assertTrue("the call never reached the in-flight state", client.hasInFlightCalls())
 
         val startedAt = System.nanoTime()
         client.close()
