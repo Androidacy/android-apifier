@@ -22,11 +22,17 @@ import com.androidacy.apifier.http.Call
 import com.androidacy.apifier.http.Callback
 import com.androidacy.apifier.http.Cookie
 import com.androidacy.apifier.http.CookieJar
+import com.androidacy.apifier.http.ErrorCode
 import com.androidacy.apifier.http.Headers
 import com.androidacy.apifier.http.MediaType
 import com.androidacy.apifier.http.Request
 import com.androidacy.apifier.http.Response
 import com.androidacy.apifier.http.ResponseBody
+import com.androidacy.apifier.observe.LoggingObserver
+import com.androidacy.apifier.observe.Observation
+import com.androidacy.apifier.observe.Outcome
+import com.androidacy.apifier.observe.RequestEvent
+import com.androidacy.apifier.observe.RequestObserver
 import com.androidacy.apifier.patterns.BackoffConfig
 import com.androidacy.apifier.patterns.CircuitBreaker
 import com.androidacy.apifier.patterns.ExponentialBackoff
@@ -51,7 +57,9 @@ data class CallOptions(
     /** Attempt ceiling for this call; null takes `retryConfig.maxAttempts`, and 1 means no retry. */
     val maxAttempts: Int? = null,
     /** Budget for the whole call across every attempt; null takes `timeouts.call`. */
-    val callTimeoutMillis: Long? = null
+    val callTimeoutMillis: Long? = null,
+    /** Sees exactly one event for this call: the completing attempt, or the last failure. */
+    val observer: RequestObserver? = null
 )
 
 /** The transport entry the pipeline drives. [CronetTransport.newCall] satisfies it. */
@@ -128,13 +136,17 @@ internal class Pipeline(
     private val publicSuffixList: PublicSuffixList?,
     private val trustCheck: ProtectedDomainCheck?,
     private val breakers: BreakerRegistry,
-    private val scheduler: ScheduledExecutorService
+    private val scheduler: ScheduledExecutorService,
+    /** Label reported on every [RequestEvent] as the serving provider, e.g. the Cronet engine version. */
+    private val provider: String = "unknown",
+    private val observation: Observation = Observation()
 ) {
 
     init {
         require(cookieJar == null || publicSuffixList != null) {
             "a cookie jar needs a public suffix list to scope incoming cookies"
         }
+        if (config.logRequests) observation.addObserver(LoggingObserver())
     }
 
     fun execute(request: Request, options: CallOptions, call: PipelineCall): Response {
@@ -154,7 +166,7 @@ internal class Pipeline(
             gateTrust(host, deadlineAt)
             val breaker = breakers.forHost(host)
             if (breaker != null && !breaker.checkState()) throw ApifierException.CircuitOpen(host)
-            attempts(request, options, call, breaker, timeoutMs, deadlineAt)
+            attempts(request, options, call, breaker, timeoutMs, deadlineAt, host)
         } catch (e: Throwable) {
             timeoutTask.cancel(false)
             throw e
@@ -188,7 +200,8 @@ internal class Pipeline(
         call: PipelineCall,
         breaker: CircuitBreaker?,
         timeoutMs: Long,
-        deadlineAt: Long
+        deadlineAt: Long,
+        host: String
     ): Response {
         val retry = config.retryConfig
         val maxAttempts = (options.maxAttempts ?: retry.maxAttempts).coerceAtLeast(1)
@@ -201,11 +214,17 @@ internal class Pipeline(
             call.attempt = attempt
             surrenderIfDone(call, timeoutMs)
             val prepared = prepare(request)
+            val metrics = AttemptMetrics()
+            val attemptStartNanos = System.nanoTime()
             try {
-                val response = attemptOnce(prepared, call, timeoutMs, deadlineAt)
-                if (response.code >= 500 && attempt < maxAttempts - 1 && retry.retryOn5xx &&
+                val response = attemptOnce(prepared, call, timeoutMs, deadlineAt, metrics)
+                val willRetry = response.code >= 500 && attempt < maxAttempts - 1 && retry.retryOn5xx &&
                     (!retry.retryIdempotentOnly || idempotent)
-                ) {
+                emitAttempt(
+                    host, prepared.method, attempt, willRetry, metrics, attemptStartNanos,
+                    Outcome.SUCCESS, errorCode = null, responseCode = response.code, options
+                )
+                if (willRetry) {
                     response.close()
                     backoffSleep(backoff.calculateDelay(attempt), call, timeoutMs)
                     attempt++
@@ -221,9 +240,13 @@ internal class Pipeline(
                 return withProgress(prepared, response)
             } catch (e: IOException) {
                 val retryable = e !is ApifierException || e.retryable
-                if (retryable && attempt < maxAttempts - 1 &&
+                val willRetry = retryable && attempt < maxAttempts - 1 &&
                     (!retry.retryIdempotentOnly || idempotent)
-                ) {
+                emitAttempt(
+                    host, prepared.method, attempt, willRetry, metrics, attemptStartNanos,
+                    Outcome.FAILED, errorCode = errorCodeOf(e), responseCode = null, options
+                )
+                if (willRetry) {
                     backoffSleep(backoff.calculateDelay(attempt), call, timeoutMs)
                     attempt++
                     continue
@@ -265,7 +288,8 @@ internal class Pipeline(
         request: Request,
         call: PipelineCall,
         timeoutMs: Long,
-        deadlineAt: Long
+        deadlineAt: Long,
+        metrics: AttemptMetrics
     ): Response {
         val done = CountDownLatch(1)
         val result = AtomicReference<Response?>()
@@ -276,9 +300,14 @@ internal class Pipeline(
             object : TransportListener {
                 override fun onRedirect(hopUri: Uri, hopHeaders: Headers) = saveCookies(hopUri, hopHeaders)
 
-                override fun onResponseStarted(ttfbMillis: Long) = Unit
+                override fun onResponseStarted(ttfbMillis: Long) {
+                    metrics.ttfbMillis = ttfbMillis
+                }
 
-                override fun onTransferComplete(bytesSent: Long, bytesReceived: Long) = Unit
+                override fun onTransferComplete(bytesSent: Long, bytesReceived: Long) {
+                    metrics.bytesSent = bytesSent
+                    metrics.bytesReceived = bytesReceived
+                }
             }
         )
         call.inFlight = transportCall
@@ -364,12 +393,60 @@ internal class Pipeline(
     private fun surface(e: IOException, call: PipelineCall, timeoutMs: Long): IOException =
         if (call.isTimedOut) ApifierException.CallTimeout(timeoutMs) else e
 
+    /**
+     * Reports one attempt. The per-request observer is passed only on [willRetry] false, the
+     * attempt that ends the logical call, since it must see exactly one event.
+     */
+    private fun emitAttempt(
+        host: String,
+        method: String,
+        attemptIndex: Int,
+        willRetry: Boolean,
+        metrics: AttemptMetrics,
+        attemptStartNanos: Long,
+        outcome: Outcome,
+        errorCode: ErrorCode?,
+        responseCode: Int?,
+        options: CallOptions
+    ) {
+        val event = RequestEvent(
+            outcome = outcome,
+            errorCode = errorCode,
+            responseCode = responseCode,
+            elapsedMillis = (System.nanoTime() - attemptStartNanos) / NANOS_PER_MILLI,
+            ttfbMillis = metrics.ttfbMillis,
+            bytesSent = metrics.bytesSent,
+            bytesReceived = metrics.bytesReceived,
+            host = host,
+            method = method,
+            attempt = attemptIndex + 1,
+            provider = provider,
+            willRetry = willRetry
+        )
+        observation.emit(event, if (willRetry) null else options.observer)
+    }
+
+    private fun errorCodeOf(e: IOException): ErrorCode = (e as? ApifierException)?.errorCode ?: ErrorCode.OTHER
+
     private companion object {
         val IDEMPOTENT_METHODS = setOf("GET", "HEAD")
         const val BACKOFF_SLICE_MS = 50L
         const val TRUST_VERDICT_WAIT_MS = 2_000L
         const val TERMINAL_CALLBACK_GRACE_MS = 250L
+        const val NANOS_PER_MILLI = 1_000_000L
     }
+}
+
+/** Per-attempt timing and byte counts, filled from [TransportListener] as the attempt runs. */
+private class AttemptMetrics {
+    @Volatile
+    var ttfbMillis: Long? = null
+
+    @Volatile
+    var bytesSent: Long = 0L
+
+    @Volatile
+    var bytesReceived: Long = 0L
 }
 
 /**

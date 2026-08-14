@@ -30,7 +30,9 @@ data class NetworkConfig(
     val circuitBreakerConfig: CircuitBreakerConfig = CircuitBreakerConfig(),
     val cookieStorage: CookieStorage? = null,
     val headers: Map<String, String> = emptyMap(),
-    val dynamicHeaders: Map<String, () -> String> = emptyMap()
+    val dynamicHeaders: Map<String, () -> String> = emptyMap(),
+    /** Registers an internal `Log.d`-per-event observer. Advisory only; release logcat is stripped. */
+    val logRequests: Boolean = false
 )
 
 /** DNS-over-HTTPS provider endpoints. Uses IP-based URLs to avoid bootstrap DNS dependency. */
@@ -158,6 +160,7 @@ class NetworkConfigBuilder {
     private var cookieStorage: CookieStorage? = null
     private val headers = mutableMapOf<String, String>()
     private val dynamicHeaders = mutableMapOf<String, () -> String>()
+    var logRequests: Boolean = false
 
     fun cronet(block: CronetConfigBuilder.() -> Unit) {
         cronetConfig = CronetConfigBuilder().apply(block).build()
@@ -193,7 +196,7 @@ class NetworkConfigBuilder {
 
     fun build() = NetworkConfig(
         cronetConfig, timeouts, connectionPool, retryConfig, circuitBreakerConfig,
-        cookieStorage, headers, dynamicHeaders
+        cookieStorage, headers, dynamicHeaders, logRequests
     )
 }
 
