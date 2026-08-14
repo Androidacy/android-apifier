@@ -143,7 +143,8 @@ class MyCookieStorage : CookieStorage {
 ## Progress Tracking
 
 A request that sends a body and reads one reports both halves to the same listener, so every
-update carries the direction it belongs to and each direction reaches `done` once.
+update carries the direction it belongs to. A body of unknown length reports progress but never
+reaches `done`, and a retried upload counts from zero again.
 
 ```kotlin
 val listener = object : ProgressListener {

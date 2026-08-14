@@ -21,8 +21,11 @@ enum class ProgressDirection { UPLOAD, DOWNLOAD }
 /** Callback for tracking byte progress. */
 interface ProgressListener {
     /**
-     * A request that both sends a body and reads one reports both halves to the same listener, so
-     * each direction runs its own count and reaches [done] once.
+     * A request that both sends a body and reads one reports both halves to the same listener,
+     * each direction running its own count.
+     *
+     * A body of unknown length reports progress but never reaches [done], since there is no total
+     * to reach, and a retried upload counts from zero again.
      *
      * @param bytesTransferred total bytes moved so far in [direction]
      * @param contentLength total expected bytes, or -1 if unknown
