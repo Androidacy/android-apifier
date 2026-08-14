@@ -432,7 +432,6 @@ class ApifierClient internal constructor(
                 inFlight.remove(this)
                 // The consumer is owed exactly one terminal callback. An interrupt during a
                 // shutdown, or any other non-IO failure, must not leave it waiting forever.
-                if (e is InterruptedException) Thread.currentThread().interrupt()
                 dispatch { callback.onFailure(this, asDeclaredFailure(e)) }
                 return
             }

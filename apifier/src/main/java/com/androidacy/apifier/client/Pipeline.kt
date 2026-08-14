@@ -37,6 +37,7 @@ import com.androidacy.apifier.patterns.CircuitBreaker
 import com.androidacy.apifier.patterns.ExponentialBackoff
 import com.androidacy.apifier.progress.Progress
 import com.androidacy.apifier.security.PublicSuffixList
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.runBlocking
@@ -226,9 +227,18 @@ internal class Pipeline(
         } catch (e: Throwable) {
             timeoutTask.cancel(false)
             // Several paths end a call without reaching reportAttempt: the trust gate, the
-            // breaker, and a cancel or timeout landing in backoff between attempts.
-            if (e is IOException && !call.terminalEventEmitted) {
-                reportTerminalFailure(host, request.method, call, errorCodeOf(e), callStartNanos, options)
+            // breaker, and a cancel or timeout landing in backoff between attempts. A coroutine
+            // cancellation is one of them and is not an IOException, but it ends the call just as
+            // a caller's own cancel does, and the observer is owed the same terminal event.
+            if (!call.terminalEventEmitted) {
+                val errorCode = when (e) {
+                    is IOException -> errorCodeOf(e)
+                    is CancellationException -> ErrorCode.CANCELLED
+                    else -> null
+                }
+                errorCode?.let {
+                    reportTerminalFailure(host, request.method, call, it, callStartNanos, options)
+                }
             }
             throw e
         }
@@ -367,13 +377,12 @@ internal class Pipeline(
                 }
             }
         )
+        // Left set past the response too: the body is still streaming through this call, so a
+        // cancel after the headers arrive has to reach it.
         call.inFlight = transportCall
         if (call.isCanceled) transportCall.cancel()
 
         val response = transportCall.await()
-        // inFlight stays set: the body is still streaming through this call, so a cancel after
-        // the headers arrive has to reach it.
-
         saveCookies(answeredBy.get(), response.headers)
         return response
     }
@@ -519,8 +528,9 @@ internal class Pipeline(
 /**
  * Runs [Pipeline.execute] on the calling thread, for the deprecated blocking [Call.execute].
  *
- * An interrupt is the only cancellation signal a blocking caller has, and [kotlinx.coroutines.runBlocking]
- * reports it as an [InterruptedException] that says nothing to the transport still in flight.
+ * An interrupt is the only cancellation signal a blocking caller has. [kotlinx.coroutines.runBlocking]
+ * turns it into a cancellation of the call and rethrows it once the call has unwound, and an
+ * [InterruptedException] says nothing to the transport that call left in flight.
  */
 internal fun Pipeline.executeBlocking(request: Request, options: CallOptions, call: PipelineCall): Response =
     try {

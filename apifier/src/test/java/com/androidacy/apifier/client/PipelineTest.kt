@@ -35,6 +35,7 @@ import com.androidacy.apifier.http.ResponseBody
 import com.androidacy.apifier.http.ResponseBody.Companion.asResponseBody
 import com.androidacy.apifier.http.ResponseBody.Companion.toResponseBody
 import com.androidacy.apifier.observe.Observation
+import com.androidacy.apifier.observe.RequestEvent
 import com.androidacy.apifier.progress.Progress
 import com.androidacy.apifier.security.PublicSuffixList
 import kotlinx.coroutines.CompletableDeferred
@@ -70,6 +71,7 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.security.KeyStore
 import java.security.cert.X509Certificate
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -479,6 +481,41 @@ class PipelineTest {
 
         assertTrue("a body still in hand leaves the budget armed", streaming.isTimedOut)
         assertFalse("closing the body disarms the budget", closed.isTimedOut)
+    }
+
+    /**
+     * An interrupted blocking caller ends its call with a coroutine cancellation. Production
+     * changes that fail this: reporting only IOException failures from execute's catch-all, which
+     * a cancellation is not; or leaving the budget armed on the way out.
+     */
+    @Suppress("DEPRECATION")
+    @Test
+    fun interruptedCallStillReportsItsEndAndDisarmsTheBudget() {
+        val transport = FakeTransport(listOf(step { ok(it, 500) }, step { ok(it) }))
+        val events = CopyOnWriteArrayList<RequestEvent>()
+        observation.addObserver { events.add(it) }
+        val pipeline = pipelineOf(transport, config(retry = RetryConfig(maxAttempts = 2)))
+        val call = PipelineCall()
+        val outcome = AtomicReference<Throwable?>()
+        val worker = thread(isDaemon = true) {
+            outcome.set(
+                runCatching {
+                    pipeline.executeBlocking(request().build(), CallOptions(callTimeoutMillis = 400), call).close()
+                }.exceptionOrNull()
+            )
+        }
+
+        Thread.sleep(200)
+        worker.interrupt()
+        worker.join(5_000)
+        // Past the budget deadline: a timer nobody disarmed has fired by now.
+        Thread.sleep(500)
+
+        assertTrue("got ${outcome.get()}", outcome.get() is ApifierException.Cancelled)
+        assertFalse("an interrupted call must not leave its budget armed", call.isTimedOut)
+        val terminal = events.filter { !it.willRetry }
+        assertEquals("one terminal event, got $terminal", 1, terminal.size)
+        assertEquals(ErrorCode.CANCELLED, terminal[0].errorCode)
     }
 
     @Test
