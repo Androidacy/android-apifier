@@ -196,6 +196,53 @@ class PipelineTest {
         assertEquals(listOf("h"), hopSave.second.map { it.name })
     }
 
+    /**
+     * Production change that fails this: reverting the cookie-save hop in [Pipeline.attemptOnce]
+     * back to a plain `withContext(Dispatchers.IO)`, which lets a cancel land between the save
+     * completing and control returning to the caller, dropping the response before anyone can
+     * close it.
+     */
+    @Test
+    fun cancellingDuringCookieSaveDoesNotLeakTheResponseBody() {
+        val enteredCookieSave = CountDownLatch(1)
+        val releaseCookieSave = CountDownLatch(1)
+        val body = TrackingBody()
+        val jar = object : CookieJar {
+            override fun loadForRequest(uri: Uri): List<Cookie> = emptyList()
+
+            override fun saveFromResponse(uri: Uri, cookies: List<Cookie>) {
+                enteredCookieSave.countDown()
+                releaseCookieSave.await(5, TimeUnit.SECONDS)
+            }
+        }
+        val transport = FakeTransport(
+            listOf(step { ok(it, headers = Headers.headersOf("Set-Cookie", "a=1"), body = body) })
+        )
+        val pipeline = pipelineOf(transport, config(), jar = jar)
+        val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+
+        try {
+            runBlocking {
+                val scope = CoroutineScope(dispatcher)
+                val job = scope.launch {
+                    val response = pipeline.execute(request().build(), CallOptions(), PipelineCall())
+                    // A well-behaved caller closes as soon as it gets control back; this only
+                    // runs if the response actually made it out of the pipeline.
+                    response.body.close()
+                }
+
+                assertTrue(enteredCookieSave.await(5, TimeUnit.SECONDS))
+                job.cancel()
+                releaseCookieSave.countDown()
+                job.join()
+
+                assertTrue("cancelling during the cookie save must not drop the response body unclosed", body.closed)
+            }
+        } finally {
+            dispatcher.close()
+        }
+    }
+
     @Test
     fun responseCookiesScopedToTheHostThatAnswered() {
         val landing = Uri.parse("https://redirected.example.com/landing")

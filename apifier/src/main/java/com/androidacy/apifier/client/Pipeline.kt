@@ -378,7 +378,15 @@ internal class Pipeline(
         if (call.isCanceled) transportCall.cancel()
 
         val response = transportCall.await()
-        withContext(Dispatchers.IO) { saveCookies(answeredBy.get(), response.headers) }
+        // A cancel here, even one that lands only on the resumption after saveCookies has already
+        // finished, unwinds this suspend call without touching response; nothing else on this path
+        // would close it.
+        try {
+            withContext(Dispatchers.IO) { saveCookies(answeredBy.get(), response.headers) }
+        } catch (e: Throwable) {
+            response.close()
+            throw e
+        }
         return response
     }
 
