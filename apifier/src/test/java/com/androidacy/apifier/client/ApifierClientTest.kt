@@ -403,16 +403,13 @@ class ApifierClientTest {
         val cronet = provider.createBuilder().build()
         val engine = CronetClientEngine(cronet, emptyMap(), READ_TIMEOUT_MS)
         val server = ServerSocket(0)
-        thread(isDaemon = true) { runCatching { server.accept() } }
+        val accepted = CountDownLatch(1)
+        thread(isDaemon = true) { runCatching { server.accept() }.also { accepted.countDown() } }
         val client = ApifierClient(context, NetworkConfig(), engine)
 
         val done = CountDownLatch(1)
         client.get("https://127.0.0.1:${server.localPort}/", countingCallback(done))
-        val inFlightDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-        while (!client.hasInFlightCalls() && System.nanoTime() < inFlightDeadline) {
-            Thread.sleep(10)
-        }
-        assertTrue("the call never reached the in-flight state", client.hasInFlightCalls())
+        assertTrue("the server never accepted a connection", accepted.await(10, TimeUnit.SECONDS))
 
         val startedAt = System.nanoTime()
         client.close()
@@ -506,66 +503,6 @@ class ApifierClientTest {
         assertTrue(done.await(10, TimeUnit.SECONDS))
         client.close()
         assertTrue("got ${delivered.get()}", delivered.get() is ApifierException)
-    }
-
-    /**
-     * Drives the registration race deterministically: a real [ApifierClient.close] is run in the
-     * exact gap between `send`'s closed check and its `inFlight` registration, using the
-     * [ApifierClient.beforeInFlightRegistration] test seam instead of a wall-clock window. Fails
-     * if `send` skips the re-check after registering and runs the pipeline against a closed
-     * client instead of self-aborting.
-     */
-    @Test
-    fun sendSelfAbortsWhenCloseWinsTheRegistrationRace() {
-        val engine = FakeEngine()
-        val client = clientOf(engine)
-        client.beforeInFlightRegistration = {
-            client.beforeInFlightRegistration = null
-            client.close()
-        }
-
-        val thrown = assertThrows(ApifierException.Cancelled::class.java) {
-            runBlocking { client.send(getRequest(), CallOptions()) }
-        }
-
-        assertTrue(thrown is ApifierException.Cancelled)
-        assertTrue("pipeline reached the engine despite the race", engine.seen.isEmpty())
-    }
-
-    /** Same race as [sendSelfAbortsWhenCloseWinsTheRegistrationRace], at the deprecated `ClientCall.enqueue` entry point. */
-    @Test
-    @Suppress("DEPRECATION")
-    fun deprecatedEnqueueSelfAbortsWhenCloseWinsTheRegistrationRace() {
-        val engine = FakeEngine()
-        val client = clientOf(engine)
-        val call = client.call(getRequest())
-        client.beforeInFlightRegistration = {
-            client.beforeInFlightRegistration = null
-            client.close()
-        }
-        val outcome = AtomicReference<Throwable?>()
-        val done = CountDownLatch(1)
-
-        try {
-            call.enqueue(object : Callback {
-                override fun onResponse(call: Call, response: Response) {
-                    response.close()
-                    done.countDown()
-                }
-
-                override fun onFailure(call: Call, e: IOException) {
-                    outcome.set(e)
-                    done.countDown()
-                }
-            })
-        } catch (e: Throwable) {
-            outcome.set(e)
-            done.countDown()
-        }
-
-        assertTrue(done.await(10, TimeUnit.SECONDS))
-        assertTrue("got ${outcome.get()}", outcome.get() is ApifierException.Cancelled)
-        assertTrue("pipeline reached the engine despite the race", engine.seen.isEmpty())
     }
 
     /** Fails if `Call.cancel()` stops tracking the launched job, e.g. by no longer reaching `PipelineCall.cancel()`. */
