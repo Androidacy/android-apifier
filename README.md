@@ -145,29 +145,25 @@ class MyCookieStorage : CookieStorage {
 
 ## Progress Tracking
 
-A request that sends a body and reads one reports both halves to the same listener, so every
-update carries the direction it belongs to. A body of unknown length reports progress but never
-reaches `done`, and a retried upload counts from zero again.
+A request that sends a body and reads one reports both halves into the same sink, one at a time:
+the upload completes before the download starts, so nothing needs to say which phase an update
+belongs to. A body of unknown length reports progress but never reaches its total, since none is
+known, and a retried upload counts from zero again.
+
+Build the sink with `extraBufferCapacity > 0`. A default `MutableSharedFlow<Progress>()` has no
+buffer space, and its `tryEmit` returns `false` for every update, so it silently reports nothing.
 
 ```kotlin
-val listener = object : ProgressListener {
-    override fun update(
-        bytesTransferred: Long,
-        contentLength: Long,
-        done: Boolean,
-        direction: ProgressDirection
-    ) {
-        if (contentLength <= 0) return
-        val percent = (bytesTransferred * 100 / contentLength).toInt()
-        when (direction) {
-            ProgressDirection.UPLOAD -> updateUploadBar(percent)
-            ProgressDirection.DOWNLOAD -> updateDownloadBar(percent)
-        }
+val progress = MutableSharedFlow<Progress>(extraBufferCapacity = 64)
+scope.launch {
+    progress.collect { (bytesTransferred, contentLength) ->
+        if (contentLength <= 0) return@collect
+        updateProgressBar((bytesTransferred * 100 / contentLength).toInt())
     }
 }
 
-client.download(url, listener, callback)
-client.upload(url, files, fileNames, listener, callback)
+client.download(url, progress, callback)
+client.upload(url, files, fileNames, progress, callback)
 ```
 
 ## Security
@@ -197,9 +193,8 @@ backend is configured.
   streaming when the callback fires. Post to your own handler before touching the UI, read or
   close the body, and do not treat the callback returning as the end of the call: the client stays
   active until the body ends.
-- `ProgressListener.update` takes a `ProgressDirection` and its first parameter is now
-  `bytesTransferred`. A request that both sends a body and reads one reports each half separately,
-  so a listener that assumed a single count to `done` sees two.
+- `ProgressListener` is gone. `download` and `upload` now take a `MutableSharedFlow<Progress>`,
+  built with `extraBufferCapacity > 0`; see [Progress Tracking](#progress-tracking).
 - Failures arrive as `ApifierException` subtypes. Code matching on the old flat
   `IOException("Cronet request failed")` message needs to switch on `errorCode` instead.
 - `ApifierClient` is `Closeable` and owns an engine, thread pools and a network callback. Call

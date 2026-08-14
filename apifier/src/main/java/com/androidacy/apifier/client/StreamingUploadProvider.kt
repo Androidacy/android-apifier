@@ -16,10 +16,10 @@
 package com.androidacy.apifier.client
 
 import com.androidacy.apifier.http.RequestBody
-import com.androidacy.apifier.progress.ProgressDirection
-import com.androidacy.apifier.progress.ProgressListener
+import com.androidacy.apifier.progress.Progress
 import java.io.IOException
 import java.nio.ByteBuffer
+import kotlinx.coroutines.flow.MutableSharedFlow
 import okio.Buffer
 import okio.Source
 import org.chromium.net.UploadDataProvider
@@ -36,7 +36,7 @@ import org.chromium.net.UploadDataSink
  */
 internal class StreamingUploadProvider(
     private val body: RequestBody,
-    private val listener: ProgressListener?,
+    private val progress: MutableSharedFlow<Progress>?,
     private val onBytesSent: (Long) -> Unit = {}
 ) : UploadDataProvider() {
 
@@ -86,6 +86,6 @@ internal class StreamingUploadProvider(
 
     private fun report() {
         onBytesSent(sent)
-        listener?.update(sent, total, total in 0..sent, ProgressDirection.UPLOAD)
+        if (body.streamsFromDisk) progress?.tryEmit(Progress(sent, total))
     }
 }

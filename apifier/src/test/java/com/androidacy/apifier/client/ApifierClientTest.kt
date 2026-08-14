@@ -29,8 +29,8 @@ import com.androidacy.apifier.http.ResponseBody.Companion.toResponseBody
 import com.androidacy.apifier.observe.Outcome
 import com.androidacy.apifier.observe.RequestEvent
 import com.androidacy.apifier.observe.RequestObserver
-import com.androidacy.apifier.progress.ProgressDirection
-import com.androidacy.apifier.progress.ProgressListener
+import com.androidacy.apifier.progress.Progress
+import kotlinx.coroutines.flow.MutableSharedFlow
 import org.chromium.net.CronetProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -65,14 +65,7 @@ class ApifierClientTest {
         val engine = FakeEngine()
         val client = clientOf(engine)
         val file = temporaryFolder.newFile("payload.bin").apply { writeBytes(ByteArray(4)) }
-        val progress = object : ProgressListener {
-            override fun update(
-                bytesTransferred: Long,
-                contentLength: Long,
-                done: Boolean,
-                direction: ProgressDirection
-            ) = Unit
-        }
+        val progress = MutableSharedFlow<Progress>(extraBufferCapacity = 8)
         val done = CountDownLatch(6)
         val callback = countingCallback(done)
 
@@ -87,7 +80,7 @@ class ApifierClientTest {
         client.close()
 
         val seen = engine.seen.associateBy { request ->
-            request.method + if (request.tag(ProgressListener::class.java) == null) "" else "+p"
+            request.method + if (request.tag(ProgressSink::class.java) == null) "" else "+p"
         }
         assertEquals(setOf("GET", "POST", "DELETE", "HEAD", "GET+p", "POST+p"), seen.keys)
         assertEquals("application/json", seen.getValue("POST").body?.contentType()?.toString())

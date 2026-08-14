@@ -47,6 +47,14 @@ abstract class RequestBody {
      */
     internal open fun pullSource(): Source = Buffer().also { writeTo(it) }
 
+    /**
+     * True when [pullSource] reads from a source already resident outside the JVM heap (a
+     * file). Upload progress is only reported for this shape: an in-memory body is a few
+     * kilobytes at most, small enough that reporting it would snap a caller's count straight to
+     * full and then reset it for the download that follows.
+     */
+    internal open val streamsFromDisk: Boolean = false
+
     companion object {
         /** Encodes with the charset of [contentType], or UTF-8 when it names none. */
         @JvmStatic
@@ -87,6 +95,8 @@ abstract class RequestBody {
                 }
 
                 override fun pullSource(): Source = file.source()
+
+                override val streamsFromDisk: Boolean = true
             }
         }
     }

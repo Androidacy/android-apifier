@@ -30,28 +30,39 @@ import com.androidacy.apifier.http.Headers
 import com.androidacy.apifier.http.MediaType
 import com.androidacy.apifier.http.Protocol
 import com.androidacy.apifier.http.Request
+import com.androidacy.apifier.http.RequestBody.Companion.asRequestBody
 import com.androidacy.apifier.http.RequestBody.Companion.toRequestBody
 import com.androidacy.apifier.http.Response
 import com.androidacy.apifier.http.ResponseBody
 import com.androidacy.apifier.http.ResponseBody.Companion.asResponseBody
 import com.androidacy.apifier.http.ResponseBody.Companion.toResponseBody
 import com.androidacy.apifier.observe.Observation
-import com.androidacy.apifier.progress.ProgressDirection
-import com.androidacy.apifier.progress.ProgressListener
+import com.androidacy.apifier.progress.Progress
 import com.androidacy.apifier.security.PublicSuffixList
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.runTest
 import okio.Buffer
 import okio.BufferedSource
 import okio.Source
 import okio.Timeout
 import okio.buffer
+import org.chromium.net.UploadDataSink
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import java.io.File
 import java.io.IOException
+import java.nio.ByteBuffer
 import java.security.KeyStore
 import java.security.cert.X509Certificate
 import java.util.concurrent.CountDownLatch
@@ -61,6 +72,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
+@OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 class PipelineTest {
 
@@ -414,34 +426,130 @@ class PipelineTest {
         assertTrue("surrendered after ${elapsedMs}ms", elapsedMs < 700)
     }
 
+    /** Production change that fails this: restoring the dedup guard over the EOF emission. */
     @Test
-    fun progressSemanticsPreserved() {
-        val payload = ByteArray(12) { it.toByte() }
-        val transport = FakeTransport(listOf(step { ok(it, body = chunkedBody(payload, 4)) }))
+    fun downloadSinkEmitsTerminalTotalAtEof() = runTest {
+        val payload = ByteArray(30) { it.toByte() }
+        val (sink, collected) = collectingSink(this)
+
+        ProgressBody(chunkedBody(payload, 10), sink).source().readByteArray()
+
+        // The last data-bearing read already reports 30, so a dedup guard over the EOF
+        // emission would leave the same final value behind; only the count of emissions
+        // (one extra at EOF, on top of one per 10-byte chunk) tells the two apart.
+        assertEquals(4, collected.size)
+        assertEquals(30L, collected.last().bytesTransferred)
+    }
+
+    /** Production change that fails this: inventing a total for unknown-length bodies. */
+    @Test
+    fun unknownLengthBodyEmitsWithoutTerminal() = runTest {
+        val payload = ByteArray(20) { it.toByte() }
+        val (sink, collected) = collectingSink(this)
+
+        ProgressBody(chunkedBody(payload, 6, contentLength = -1L), sink).source().readByteArray()
+
+        assertTrue(collected.isNotEmpty())
+        assertTrue(
+            "no emission may claim a total when none is known",
+            collected.none { it.bytesTransferred == it.contentLength }
+        )
+    }
+
+    /** Production change that fails this: inserting ProgressBody unconditionally. */
+    @Test
+    fun absentSinkInsertsNoProgressLayer() {
+        val pipeline = pipelineOf(FakeTransport(listOf(step { ok(it) })), config())
+        val response = ok(request().build(), body = chunkedBody(ByteArray(4), 4))
+
+        assertSame(response, pipeline.withProgress(response, CallOptions()))
+    }
+
+    /**
+     * Production change that fails this: changing the documented capacity guidance in
+     * [CallOptions.progress]'s KDoc without changing what emission actually requires. A
+     * default-constructed [MutableSharedFlow] drops every emission even with a collector
+     * already attached, because its zero-length buffer has no room for one until the
+     * collector re-suspends to receive it, which never happens between two back-to-back reads.
+     */
+    @Test
+    fun sinkWithDocumentedCapacityReceivesEveryEmission() = runTest {
+        val (documented, documentedCollected) = collectingSink(this)
+        val default = MutableSharedFlow<Progress>()
+        val defaultCollected = mutableListOf<Progress>()
+        val defaultScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        defaultScope.launch { default.collect { defaultCollected += it } }
+        val payload = ByteArray(9) { it.toByte() }
+
+        ProgressBody(chunkedBody(payload, 3), documented).source().readByteArray()
+        ProgressBody(chunkedBody(payload, 3), default).source().readByteArray()
+
+        assertTrue("documented capacity must receive every emission", documentedCollected.isNotEmpty())
+        assertTrue("a default-constructed sink must receive nothing", defaultCollected.isEmpty())
+        defaultScope.cancel()
+    }
+
+    /** Production change that fails this: leaving the tag unwritten in prepare. */
+    @Test
+    fun progressSinkReachesTheTransportThroughPrepare() {
+        val transport = FakeTransport(listOf(step { ok(it) }))
         val pipeline = pipelineOf(transport, config())
-        val updates = mutableListOf<Triple<Long, Long, Boolean>>()
-        val directions = mutableSetOf<ProgressDirection>()
-        val listener = object : ProgressListener {
-            override fun update(
-                bytesTransferred: Long,
-                contentLength: Long,
-                done: Boolean,
-                direction: ProgressDirection
-            ) {
-                updates.add(Triple(bytesTransferred, contentLength, done))
-                directions.add(direction)
-            }
+        val sink = MutableSharedFlow<Progress>(extraBufferCapacity = 1)
+
+        pipeline.execute(request().build(), CallOptions(progress = sink), PipelineCall()).close()
+
+        assertSame(sink, transport.seen[0].tag(ProgressSink::class.java)?.flow)
+    }
+
+    /** Production change that fails this: starting the download emitter before the upload phase ends. */
+    @Test
+    fun uploadThenDownloadReportSequentiallyIntoOneSink() = runTest {
+        val file = File.createTempFile("pipeline-progress-test", ".bin")
+            .apply { writeBytes(ByteArray(20) { it.toByte() }) }
+        try {
+            val (sink, collected) = collectingSink(this)
+            val uploadProvider = StreamingUploadProvider(file.asRequestBody(), sink)
+            val uploadSink = RecordingUploadSink()
+            val chunkSize = 8
+            // A known content length never sets the finalChunk flag (that only applies to
+            // chunked bodies), so the read count is computed from the file length instead.
+            val reads = ((file.length() + chunkSize - 1) / chunkSize).toInt()
+            repeat(reads) { uploadProvider.read(uploadSink, ByteBuffer.allocate(chunkSize)) }
+            val uploadEmissionCount = collected.size
+            assertTrue("the upload phase must have reported before the download starts", uploadEmissionCount > 0)
+
+            ProgressBody(chunkedBody(ByteArray(10) { it.toByte() }, 4, contentLength = 10L), sink)
+                .source().readByteArray()
+
+            val uploadPhase = collected.subList(0, uploadEmissionCount)
+            val downloadPhase = collected.subList(uploadEmissionCount, collected.size)
+            assertTrue(uploadPhase.all { it.contentLength == 20L })
+            assertTrue(downloadPhase.isNotEmpty())
+            assertTrue(downloadPhase.all { it.contentLength == 10L })
+        } finally {
+            file.delete()
         }
-        val request = request().tag(ProgressListener::class.java, listener).build()
+    }
 
-        val body = pipeline.execute(request, CallOptions(), PipelineCall()).body.bytes()
+    /**
+     * Registers a live collector before returning, matching the shape [CallOptions.progress]'s
+     * KDoc documents: a sink with room in its buffer, subscribed ahead of any emission.
+     */
+    private fun collectingSink(scope: kotlinx.coroutines.test.TestScope): Pair<MutableSharedFlow<Progress>, List<Progress>> {
+        val sink = MutableSharedFlow<Progress>(extraBufferCapacity = 32)
+        val collected = mutableListOf<Progress>()
+        CoroutineScope(UnconfinedTestDispatcher(scope.testScheduler)).launch { sink.collect { collected += it } }
+        return sink to collected
+    }
 
-        assertEquals(payload.size, body.size)
-        val progress = updates.filterNot { it.third }.map { it.first }
-        assertEquals(listOf(4L, 8L, 12L), progress)
-        assertEquals(progress.distinct(), progress)
-        assertEquals(listOf(Triple(12L, 12L, true)), updates.filter { it.third })
-        assertEquals(setOf(ProgressDirection.DOWNLOAD), directions)
+    private class RecordingUploadSink : UploadDataSink() {
+        override fun onReadSucceeded(finalChunk: Boolean) = Unit
+
+        override fun onReadError(exception: Exception) = throw exception
+
+        override fun onRewindSucceeded() = Unit
+
+        override fun onRewindError(exception: Exception) = throw exception
     }
 
     private fun request(): Request.Builder = Request.Builder().url("https://$HOST/resource")
@@ -531,7 +639,7 @@ class PipelineTest {
         ok(request, body = source.buffer().asResponseBody(null, -1L))
     }
 
-    private fun chunkedBody(payload: ByteArray, chunk: Int): ResponseBody {
+    private fun chunkedBody(payload: ByteArray, chunk: Int, contentLength: Long = payload.size.toLong()): ResponseBody {
         val source = object : Source {
             private var offset = 0
 
@@ -547,7 +655,7 @@ class PipelineTest {
 
             override fun close() = Unit
         }
-        return source.buffer().asResponseBody(null, payload.size.toLong())
+        return source.buffer().asResponseBody(null, contentLength)
     }
 
     /** Disagrees with the scripted system answer, so every verdict is FAIL. */

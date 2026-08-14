@@ -42,6 +42,8 @@ class MultipartBody private constructor(
 
     override fun contentType(): MediaType = typeWithBoundary
 
+    override val streamsFromDisk: Boolean = parts.any { it.body.streamsFromDisk }
+
     /** The exact framed length, or -1 as soon as one part does not know its own length. */
     override fun contentLength(): Long = writeOrCount(null)
 

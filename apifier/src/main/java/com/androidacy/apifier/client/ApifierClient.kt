@@ -34,9 +34,10 @@ import com.androidacy.apifier.http.Response
 import com.androidacy.apifier.observe.Observation
 import com.androidacy.apifier.observe.RequestEvent
 import com.androidacy.apifier.observe.RequestObserver
-import com.androidacy.apifier.progress.ProgressListener
+import com.androidacy.apifier.progress.Progress
 import com.androidacy.apifier.security.PublicSuffixList
 import com.androidacy.apifier.security.SecureCookieJar
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import org.chromium.net.CronetEngine
 import java.io.Closeable
@@ -251,14 +252,10 @@ class ApifierClient internal constructor(
     fun head(url: String, callback: Callback): Call =
         enqueue(Request.Builder().url(url).head().build(), callback)
 
-    /** GET with progress tracking via [ProgressListener]. */
-    fun download(url: String, progressListener: ProgressListener, callback: Callback): Call {
-        val request = Request.Builder()
-            .url(url)
-            .tag(ProgressListener::class.java, progressListener)
-            .get()
-            .build()
-        return enqueue(request, callback)
+    /** GET with progress tracking. Build [progress] with `extraBufferCapacity > 0`; see [CallOptions.progress]. */
+    fun download(url: String, progress: MutableSharedFlow<Progress>, callback: Callback): Call {
+        val request = Request.Builder().url(url).get().build()
+        return enqueue(request, callback, CallOptions(progress = progress))
     }
 
     /** Multipart file upload. [fileNames] are form-data field names matching [files] by index. */
@@ -266,7 +263,7 @@ class ApifierClient internal constructor(
         url: String,
         files: List<File>,
         fileNames: List<String>,
-        progressListener: ProgressListener? = null,
+        progress: MutableSharedFlow<Progress>? = null,
         callback: Callback
     ): Call {
         require(files.isNotEmpty()) { "Files list cannot be empty" }
@@ -286,13 +283,8 @@ class ApifierClient internal constructor(
             }
             .build()
 
-        val requestBuilder = Request.Builder().url(url).post(requestBody)
-
-        if (progressListener != null) {
-            requestBuilder.tag(ProgressListener::class.java, progressListener)
-        }
-
-        return enqueue(requestBuilder.build(), callback)
+        val request = Request.Builder().url(url).post(requestBody).build()
+        return enqueue(request, callback, CallOptions(progress = progress))
     }
 
     /** Every [RequestEvent] this client's calls report, across every request. */
@@ -376,8 +368,8 @@ class ApifierClient internal constructor(
         }
     }
 
-    private fun enqueue(request: Request, callback: Callback): Call =
-        call(request).also { it.enqueue(callback) }
+    private fun enqueue(request: Request, callback: Callback, options: CallOptions = CallOptions()): Call =
+        call(request, options).also { it.enqueue(callback) }
 
     /**
      * One logical call: a pipeline run the client can cancel and account for while it is in

@@ -36,9 +36,9 @@ import com.androidacy.apifier.observe.RequestObserver
 import com.androidacy.apifier.patterns.BackoffConfig
 import com.androidacy.apifier.patterns.CircuitBreaker
 import com.androidacy.apifier.patterns.ExponentialBackoff
-import com.androidacy.apifier.progress.ProgressDirection
-import com.androidacy.apifier.progress.ProgressListener
+import com.androidacy.apifier.progress.Progress
 import com.androidacy.apifier.security.PublicSuffixList
+import kotlinx.coroutines.flow.MutableSharedFlow
 import okio.Buffer
 import okio.BufferedSource
 import okio.ForwardingSource
@@ -63,8 +63,21 @@ data class CallOptions(
     // has no client-wide replacement: ApifierClient.events carries no call identity to pick this
     // call's own terminal event out of.
     @Suppress("DEPRECATION")
-    val observer: RequestObserver? = null
+    val observer: RequestObserver? = null,
+    /**
+     * Sink for this call's byte counts. A request that both sends a body and reads one reports
+     * both phases into the same sink, one at a time: Cronet fully drains the request body before
+     * the response arrives, so an upload count and a download count never interleave.
+     *
+     * Must be built with `extraBufferCapacity > 0`. A default `MutableSharedFlow<Progress>()` has
+     * no buffer space and `tryEmit` returns false for it every time, so a caller who passes one
+     * silently receives nothing.
+     */
+    val progress: MutableSharedFlow<Progress>? = null
 )
+
+/** Carries a call's progress sink to the transport through [Request]'s tag mechanism. */
+internal class ProgressSink(val flow: MutableSharedFlow<Progress>)
 
 /** The transport entry the pipeline drives. [CronetTransport.newCall] satisfies it. */
 internal fun interface AttemptTransport {
@@ -242,7 +255,7 @@ internal class Pipeline(
         while (attempt < maxAttempts) {
             call.attempt = attempt
             surrenderIfDone(call, timeoutMs)
-            val prepared = prepare(request)
+            val prepared = prepare(request, options)
             val metrics = AttemptMetrics()
             val attemptStartNanos = System.nanoTime()
             try {
@@ -261,7 +274,7 @@ internal class Pipeline(
                         surrenderIfDone(call, timeoutMs)
                     }
                     if (response.code >= 500) breaker?.recordFailure() else breaker?.recordSuccess()
-                    return withProgress(prepared, response)
+                    return withProgress(response, options)
                 }
                 response.close()
             } catch (e: IOException) {
@@ -286,10 +299,11 @@ internal class Pipeline(
     }
 
     /** Builds the request the transport will see: global headers first, then jar cookies. */
-    private fun prepare(request: Request): Request {
+    private fun prepare(request: Request, options: CallOptions): Request {
         val builder = request.newBuilder()
         applyGlobalHeaders(request, builder)
         attachCookies(request, builder)
+        options.progress?.let { builder.tag(ProgressSink::class.java, ProgressSink(it)) }
         return builder.build()
     }
 
@@ -379,9 +393,10 @@ internal class Pipeline(
         if (cookies.isNotEmpty()) jar.saveFromResponse(uri, cookies)
     }
 
-    private fun withProgress(request: Request, response: Response): Response {
-        val listener = request.tag(ProgressListener::class.java) ?: return response
-        return response.newBuilder().body(ProgressBody(response.body, listener)).build()
+    /** Visible for direct testing: the wrapping it performs is otherwise unobservable from the bytes it produces. */
+    internal fun withProgress(response: Response, options: CallOptions): Response {
+        val sink = options.progress ?: return response
+        return response.newBuilder().body(ProgressBody(response.body, sink)).build()
     }
 
     /**
@@ -607,16 +622,22 @@ private class BudgetedBody(
     }
 }
 
-/** Reports read progress as the consumer drains [body]. */
-private class ProgressBody(
+/**
+ * Reports read progress as the consumer drains [body] into [progressSink].
+ *
+ * A body of unknown length ([ResponseBody.contentLength] of -1) still emits at EOF, but since
+ * [Progress.contentLength] stays -1 that emission never equals a byte total: there is nothing
+ * for it to reach, so no emission from such a body is ever distinguishable as terminal.
+ */
+internal class ProgressBody(
     private val body: ResponseBody,
-    private val listener: ProgressListener
+    private val progressSink: MutableSharedFlow<Progress>
 ) : ResponseBody() {
 
     private var counted: BufferedSource? = null
     private val totalRead = AtomicLong(0L)
     private val lastReported = AtomicLong(-1L)
-    private val doneReported = AtomicBoolean(false)
+    private val eofReported = AtomicBoolean(false)
 
     override fun contentType(): MediaType? = body.contentType()
 
@@ -630,21 +651,16 @@ private class ProgressBody(
             val bytesRead = super.read(sink, byteCount)
             if (bytesRead == -1L) {
                 // EOF often lands on a byte total the previous read already reported, so the
-                // dedup guard below would swallow the done signal.
-                if (!doneReported.getAndSet(true)) {
-                    listener.update(
-                        totalRead.get(),
-                        body.contentLength(),
-                        true,
-                        ProgressDirection.DOWNLOAD
-                    )
+                // dedup guard below would swallow the terminal signal.
+                if (!eofReported.getAndSet(true)) {
+                    progressSink.tryEmit(Progress(totalRead.get(), body.contentLength()))
                 }
                 return bytesRead
             }
             val current = totalRead.addAndGet(bytesRead)
             val last = lastReported.get()
             if (current != last && lastReported.compareAndSet(last, current)) {
-                listener.update(current, body.contentLength(), false, ProgressDirection.DOWNLOAD)
+                progressSink.tryEmit(Progress(current, body.contentLength()))
             }
             return bytesRead
         }

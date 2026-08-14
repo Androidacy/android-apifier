@@ -19,12 +19,19 @@ import com.androidacy.apifier.http.MediaType
 import com.androidacy.apifier.http.MultipartBody
 import com.androidacy.apifier.http.RequestBody
 import com.androidacy.apifier.http.RequestBody.Companion.asRequestBody
-import com.androidacy.apifier.progress.ProgressDirection
-import com.androidacy.apifier.progress.ProgressListener
+import com.androidacy.apifier.http.RequestBody.Companion.toRequestBody
+import com.androidacy.apifier.progress.Progress
 import java.io.File
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.runTest
 import okio.Buffer
 import okio.BufferedSink
 import okio.Source
@@ -39,6 +46,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class StreamingUploadProviderTest {
 
     private val tempFiles = mutableListOf<File>()
@@ -146,36 +154,36 @@ class StreamingUploadProviderTest {
     }
 
     @Test
-    fun progressResetsOnRewind() {
+    fun progressResetsOnRewind() = runTest {
         val body = InstrumentedBody(50L, CountingSource(50L))
-        val progress = RecordingProgress()
+        val (progress, collected) = collectingSink(this)
         val provider = StreamingUploadProvider(body, progress)
         val sink = RecordingSink()
 
         provider.read(sink, ByteBuffer.allocate(16))
         provider.read(sink, ByteBuffer.allocate(16))
-        assertTrue(progress.updates.last().bytes > 0)
+        assertTrue(collected.last().bytesTransferred > 0)
 
         provider.rewind(sink)
 
-        assertEquals(0L to 50L, progress.updates.last().let { it.bytes to it.contentLength })
+        assertEquals(0L to 50L, collected.last().let { it.bytesTransferred to it.contentLength })
     }
 
+    /** Production change that fails this: resetting the running total per read instead of accumulating it. */
     @Test
-    fun uploadProgressIsMarkedUploadAndEndsOnce() {
+    fun uploadSinkReceivesMonotonicTotals() = runTest {
         val body = InstrumentedBody(48L, CountingSource(48L))
-        val progress = RecordingProgress()
+        val (progress, collected) = collectingSink(this)
         val provider = StreamingUploadProvider(body, progress)
         val sink = RecordingSink()
 
         repeat(3) { provider.read(sink, ByteBuffer.allocate(16)) }
 
-        assertTrue(progress.updates.all { it.direction == ProgressDirection.UPLOAD })
-        assertEquals(listOf(48L), progress.updates.filter { it.done }.map { it.bytes })
+        assertEquals(listOf(16L, 32L, 48L), collected.map { it.bytesTransferred })
     }
 
     @Test
-    fun bytesSentReportedSeparatelyFromTheListener() {
+    fun bytesSentReportedSeparatelyFromProgress() {
         val body = InstrumentedBody(32L, CountingSource(32L))
         val sent = mutableListOf<Long>()
         val provider = StreamingUploadProvider(body, null) { sent += it }
@@ -186,56 +194,72 @@ class StreamingUploadProviderTest {
         assertEquals(listOf(16L, 32L), sent)
     }
 
+    /** Production change that fails this: emitting upload progress regardless of streamsFromDisk. */
     @Test
-    fun multipartStreamsPartByPart() {
-        val openCounter = AtomicInteger(0)
-        val peakOpen = AtomicInteger(0)
-        val partA = TrackingBody(ByteArray(30) { 'a'.code.toByte() }, openCounter, peakOpen)
-        val partB = TrackingBody(ByteArray(30) { 'b'.code.toByte() }, openCounter, peakOpen)
-        val multipart = MultipartBody.Builder()
-            .addFormDataPart("a", "a.bin", partA)
-            .addFormDataPart("b", "b.bin", partB)
-            .build()
+    fun inMemoryRequestBodyReportsNoUploadProgress() = runTest {
+        val body = "{}".toRequestBody(null)
+        val (progress, collected) = collectingSink(this)
+        val provider = StreamingUploadProvider(body, progress)
+        val sink = RecordingSink()
 
-        val source = multipart.pullSource()
-        val buffer = Buffer()
-        while (source.read(buffer, 8) != -1L) {
-            buffer.clear()
-        }
+        provider.read(sink, ByteBuffer.allocate(16))
 
-        assertTrue("more than one part must never be open at once, peak was ${peakOpen.get()}", peakOpen.get() <= 1)
+        assertTrue("an in-memory body must not report upload progress", collected.isEmpty())
     }
 
+    /** Production change that fails this: failing to propagate streamsFromDisk through MultipartBody. */
     @Test
-    fun multipartLeavesEarlierPartsClosedWhenALaterPartFailsToOpen() {
-        val openCounter = AtomicInteger(0)
-        val peakOpen = AtomicInteger(0)
-        val partA = TrackingBody(ByteArray(10) { 'a'.code.toByte() }, openCounter, peakOpen)
-        val failingPart = object : RequestBody() {
-            override fun contentType(): MediaType? = null
-
-            override fun contentLength(): Long = 10L
-
-            override fun writeTo(sink: BufferedSink) = throw UnsupportedOperationException()
-
-            override fun pullSource(): Source = throw IOException("part source unavailable")
-        }
+    fun multipartWithAFilePartReportsUploadProgress() = runTest {
+        val file = tempFile("multipart file part payload")
         val multipart = MultipartBody.Builder()
-            .addFormDataPart("a", "a.bin", partA)
-            .addFormDataPart("b", "b.bin", failingPart)
+            .addFormDataPart("file", file.name, file.asRequestBody())
             .build()
+        val (progress, collected) = collectingSink(this)
+        val provider = StreamingUploadProvider(multipart, progress)
+        val sink = RecordingSink()
+        val chunkSize = 8
 
-        val source = multipart.pullSource()
-        val buffer = Buffer()
-        val thrown = try {
-            while (source.read(buffer, 8) != -1L) buffer.clear()
-            null
-        } catch (e: IOException) {
-            e
-        }
+        // A known content length never sets the finalChunk flag (that only applies to chunked
+        // bodies), so the read count is computed from the length instead of read()'s own signal.
+        val reads = ((multipart.contentLength() + chunkSize - 1) / chunkSize).toInt()
+        repeat(reads) { provider.read(sink, ByteBuffer.allocate(chunkSize)) }
 
-        assertNotNull("expected the failing part's pullSource to propagate", thrown)
-        assertEquals("part A's source must already be closed, not stranded open", 0, openCounter.get())
+        assertTrue("a multipart body with a file part must report upload progress", collected.isNotEmpty())
+    }
+
+    /** Production change that fails this: replacing tryEmit with a suspending emit. */
+    @Test
+    fun progressEmissionNeverSuspendsTheTransport() {
+        val body = InstrumentedBody(32L, CountingSource(32L))
+        // No collector ever drains this, and its buffer holds only one value, so a second
+        // emission has nowhere to go; a suspending emit would block the calling thread forever.
+        val sink = MutableSharedFlow<Progress>(extraBufferCapacity = 1)
+        val provider = StreamingUploadProvider(body, sink)
+        val recordingSink = RecordingSink()
+
+        val elapsedMs = measureMillis { repeat(2) { provider.read(recordingSink, ByteBuffer.allocate(16)) } }
+
+        assertTrue("read() took ${elapsedMs}ms; tryEmit must never block the reading thread", elapsedMs < 1_000)
+    }
+
+    private fun measureMillis(block: () -> Unit): Long {
+        val start = System.nanoTime()
+        block()
+        return (System.nanoTime() - start) / 1_000_000
+    }
+
+    /**
+     * Registers a live collector before returning, matching how a caller following the
+     * documented `extraBufferCapacity > 0` shape actually receives emissions: a
+     * default-shaped flow drops every `tryEmit` even with a collector attached, since its
+     * zero-length buffer has no room for one before the collector re-suspends to receive it.
+     */
+    private fun collectingSink(scope: kotlinx.coroutines.test.TestScope): Pair<MutableSharedFlow<Progress>, List<Progress>> {
+        val sink = MutableSharedFlow<Progress>(extraBufferCapacity = 8)
+        val collected = mutableListOf<Progress>()
+        val collectorScope = CoroutineScope(UnconfinedTestDispatcher(scope.testScheduler))
+        collectorScope.launch { sink.collect { collected += it } }
+        return sink to collected
     }
 
     private fun readAll(provider: StreamingUploadProvider, sink: RecordingSink, expectedLength: Int): ByteArray {
@@ -254,26 +278,6 @@ class StreamingUploadProviderTest {
             it.writeText(content)
             tempFiles += it
         }
-
-    private class ProgressUpdate(
-        val bytes: Long,
-        val contentLength: Long,
-        val done: Boolean,
-        val direction: ProgressDirection
-    )
-
-    private class RecordingProgress : ProgressListener {
-        val updates = mutableListOf<ProgressUpdate>()
-
-        override fun update(
-            bytesTransferred: Long,
-            contentLength: Long,
-            done: Boolean,
-            direction: ProgressDirection
-        ) {
-            updates += ProgressUpdate(bytesTransferred, contentLength, done, direction)
-        }
-    }
 
     private class RecordingSink : UploadDataSink() {
         val readSucceededCalls = mutableListOf<Boolean>()
@@ -317,7 +321,11 @@ class StreamingUploadProviderTest {
         override fun close() = Unit
     }
 
-    private class InstrumentedBody(private val length: Long, private val source: Source) : RequestBody() {
+    private class InstrumentedBody(
+        private val length: Long,
+        private val source: Source,
+        override val streamsFromDisk: Boolean = true
+    ) : RequestBody() {
         var writeToCalled = false
 
         override fun contentType(): MediaType? = null
@@ -375,5 +383,57 @@ class StreamingUploadProviderTest {
                 }
             }
         }
+    }
+
+    @Test
+    fun multipartStreamsPartByPart() {
+        val openCounter = AtomicInteger(0)
+        val peakOpen = AtomicInteger(0)
+        val partA = TrackingBody(ByteArray(30) { 'a'.code.toByte() }, openCounter, peakOpen)
+        val partB = TrackingBody(ByteArray(30) { 'b'.code.toByte() }, openCounter, peakOpen)
+        val multipart = MultipartBody.Builder()
+            .addFormDataPart("a", "a.bin", partA)
+            .addFormDataPart("b", "b.bin", partB)
+            .build()
+
+        val source = multipart.pullSource()
+        val buffer = Buffer()
+        while (source.read(buffer, 8) != -1L) {
+            buffer.clear()
+        }
+
+        assertTrue("more than one part must never be open at once, peak was ${peakOpen.get()}", peakOpen.get() <= 1)
+    }
+
+    @Test
+    fun multipartLeavesEarlierPartsClosedWhenALaterPartFailsToOpen() {
+        val openCounter = AtomicInteger(0)
+        val peakOpen = AtomicInteger(0)
+        val partA = TrackingBody(ByteArray(10) { 'a'.code.toByte() }, openCounter, peakOpen)
+        val failingPart = object : RequestBody() {
+            override fun contentType(): MediaType? = null
+
+            override fun contentLength(): Long = 10L
+
+            override fun writeTo(sink: BufferedSink) = throw UnsupportedOperationException()
+
+            override fun pullSource(): Source = throw IOException("part source unavailable")
+        }
+        val multipart = MultipartBody.Builder()
+            .addFormDataPart("a", "a.bin", partA)
+            .addFormDataPart("b", "b.bin", failingPart)
+            .build()
+
+        val source = multipart.pullSource()
+        val buffer = Buffer()
+        val thrown = try {
+            while (source.read(buffer, 8) != -1L) buffer.clear()
+            null
+        } catch (e: IOException) {
+            e
+        }
+
+        assertNotNull("expected the failing part's pullSource to propagate", thrown)
+        assertEquals("part A's source must already be closed, not stranded open", 0, openCounter.get())
     }
 }

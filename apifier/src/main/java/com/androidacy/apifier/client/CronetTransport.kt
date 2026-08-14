@@ -19,7 +19,6 @@ import android.net.Uri
 import com.androidacy.apifier.http.Call
 import com.androidacy.apifier.http.Headers
 import com.androidacy.apifier.http.Request
-import com.androidacy.apifier.progress.ProgressListener
 import org.chromium.net.CronetEngine
 import org.chromium.net.UrlRequest
 import java.util.concurrent.ExecutorService
@@ -72,7 +71,7 @@ internal class CronetTransport(
                 body.contentType()?.let { addHeader("Content-Type", it.toString()) }
             }
             setUploadDataProvider(
-                StreamingUploadProvider(body, request.tag(ProgressListener::class.java)) {
+                StreamingUploadProvider(body, request.tag(ProgressSink::class.java)?.flow) {
                     bytesSent.set(it)
                 },
                 executor

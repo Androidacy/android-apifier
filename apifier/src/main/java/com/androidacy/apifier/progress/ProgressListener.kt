@@ -15,26 +15,13 @@
  */
 package com.androidacy.apifier.progress
 
-/** Which half of a call an update describes. */
-enum class ProgressDirection { UPLOAD, DOWNLOAD }
-
-/** Callback for tracking byte progress. */
-interface ProgressListener {
-    /**
-     * A request that both sends a body and reads one reports both halves to the same listener,
-     * each direction running its own count.
-     *
-     * A body of unknown length reports progress but never reaches [done], since there is no total
-     * to reach, and a retried upload counts from zero again.
-     *
-     * @param bytesTransferred total bytes moved so far in [direction]
-     * @param contentLength total expected bytes, or -1 if unknown
-     * @param done true when that direction is complete
-     */
-    fun update(
-        bytesTransferred: Long,
-        contentLength: Long,
-        done: Boolean,
-        direction: ProgressDirection
-    )
-}
+/**
+ * One point-in-time byte count for whichever phase of a call is active, upload or download.
+ *
+ * A call's phases run strictly in sequence: the request body is fully sent before the response
+ * arrives, so [bytesTransferred] never needs to say which phase it belongs to.
+ *
+ * [contentLength] is -1 when the total size is not known ahead of time, in which case no
+ * emission ever carries [bytesTransferred] equal to it: there is no total to reach.
+ */
+data class Progress(val bytesTransferred: Long, val contentLength: Long)
