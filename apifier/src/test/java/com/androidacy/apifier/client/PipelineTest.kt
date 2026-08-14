@@ -175,6 +175,28 @@ class PipelineTest {
     }
 
     @Test
+    fun responseCookiesScopedToTheHostThatAnswered() {
+        val landing = Uri.parse("https://redirected.example.com/landing")
+        val jar = RecordingJar()
+        val transport = FakeTransport(
+            listOf(
+                hopStep { request, listener ->
+                    listener?.onResponseStarted(1, landing)
+                    ok(request, headers = Headers.headersOf("Set-Cookie", "planted=1"))
+                }
+            )
+        )
+        val pipeline = pipelineOf(transport, config(), jar = jar)
+
+        pipeline.execute(request().build(), CallOptions(), PipelineCall()).close()
+
+        val save = jar.saves.single()
+        assertEquals(landing, save.first)
+        assertEquals(listOf("redirected.example.com"), save.second.map { it.domain })
+        assertTrue("origin jar must stay untouched", jar.saves.none { (uri, _) -> uri.host == HOST })
+    }
+
+    @Test
     fun fiveXxRetriedWithinPolicy() {
         val discarded = TrackingBody()
         val transport = FakeTransport(

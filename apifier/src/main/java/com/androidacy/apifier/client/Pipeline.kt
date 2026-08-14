@@ -320,14 +320,19 @@ internal class Pipeline(
         val done = CountDownLatch(1)
         val result = AtomicReference<Response?>()
         val failure = AtomicReference<IOException?>()
+        // A redirect the transport followed means the answering host is not the one addressed, and
+        // its Set-Cookie headers belong to it. Saving them against the origin would let any host
+        // the origin redirects to plant a cookie the origin then sends back.
+        val answeredBy = AtomicReference(request.uri)
 
         val transportCall = transport.newCall(
             request,
             object : TransportListener {
                 override fun onRedirect(hopUri: Uri, hopHeaders: Headers) = saveCookies(hopUri, hopHeaders)
 
-                override fun onResponseStarted(ttfbMillis: Long) {
+                override fun onResponseStarted(ttfbMillis: Long, effectiveUri: Uri) {
                     metrics.recordResponseStarted(ttfbMillis)
+                    answeredBy.set(effectiveUri)
                 }
 
                 override fun onTransferComplete(bytesSent: Long, bytesReceived: Long) {
@@ -362,7 +367,7 @@ internal class Pipeline(
 
         failure.get()?.let { throw it }
         val response = checkNotNull(result.get())
-        saveCookies(request.uri, response.headers)
+        saveCookies(answeredBy.get(), response.headers)
         return response
     }
 

@@ -438,7 +438,7 @@ class ObservationTest {
 
         override fun enqueue(callback: Callback) {
             thread(isDaemon = true) {
-                step.ttfbMillis?.let { listener?.onResponseStarted(it) }
+                step.ttfbMillis?.let { listener?.onResponseStarted(it, request.uri) }
                 try {
                     val response = step.produce(request)
                     deliver { callback.onResponse(this, response) }

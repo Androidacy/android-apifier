@@ -399,7 +399,7 @@ class ApifierClientTest {
                     if (canceled.get()) {
                         deliver { callback.onFailure(this, ApifierException.Cancelled()) }
                     } else {
-                        listener?.onResponseStarted(0)
+                        listener?.onResponseStarted(0, request.uri)
                         deliver { callback.onResponse(this, respond(request)) }
                     }
                     listener?.onTransferComplete(0, 0)

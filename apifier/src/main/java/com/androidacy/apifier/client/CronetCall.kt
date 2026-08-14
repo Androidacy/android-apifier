@@ -231,7 +231,10 @@ internal class CronetCall(
         }
 
         override fun onResponseStarted(info: UrlResponseInfo) {
-            listener?.onResponseStarted((System.nanoTime() - startNanos) / 1_000_000)
+            listener?.onResponseStarted(
+                (System.nanoTime() - startNanos) / 1_000_000,
+                Uri.parse(info.url)
+            )
 
             val assembled = ResponseAssembly.assemble(
                 headers = info.allHeadersAsList.map { it.key to it.value },

@@ -129,6 +129,23 @@ class CronetCallTest {
     }
 
     @Test
+    fun responseStartedReportsTheUrlThatAnswered() {
+        val listener = RecordingListener()
+        val harness = Harness(listener = listener)
+        harness.enqueue()
+
+        harness.cronetCallback.onResponseStarted(
+            harness.urlRequest,
+            info(url = "https://redirected.example.net/final")
+        )
+
+        assertEquals(
+            "https://redirected.example.net/final",
+            listener.effectiveUris.single().toString()
+        )
+    }
+
+    @Test
     fun onFailedMapsToTransportException() {
         val harness = Harness()
         harness.enqueue()
@@ -458,14 +475,16 @@ class CronetCallTest {
     private class RecordingListener : TransportListener {
         val redirects = mutableListOf<Pair<Uri, Headers>>()
         val ttfb = mutableListOf<Long>()
+        val effectiveUris = mutableListOf<Uri>()
         val transfers = mutableListOf<Pair<Long, Long>>()
 
         override fun onRedirect(hopUri: Uri, hopHeaders: Headers) {
             redirects += hopUri to hopHeaders
         }
 
-        override fun onResponseStarted(ttfbMillis: Long) {
+        override fun onResponseStarted(ttfbMillis: Long, effectiveUri: Uri) {
             ttfb += ttfbMillis
+            effectiveUris += effectiveUri
         }
 
         override fun onTransferComplete(bytesSent: Long, bytesReceived: Long) {
