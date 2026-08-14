@@ -59,7 +59,8 @@ interface Requester {
      * The response body is still arriving when this returns, so close the [Response] once the
      * body has been read. Cancelling the calling coroutine cancels the request.
      *
-     * @throws com.androidacy.apifier.http.ApifierException the call failed or was cancelled.
+     * @throws com.androidacy.apifier.http.ApifierException the call failed.
+     * @throws kotlinx.coroutines.CancellationException the calling coroutine was cancelled.
      * @throws IllegalStateException the client is closed.
      */
     suspend fun send(request: Request): Response
@@ -123,6 +124,10 @@ interface Requester {
      * Build [sink] with `extraBufferCapacity > 0`. A default `MutableSharedFlow<Progress>()` has
      * no buffer space and `tryEmit` returns false for it every time, so passing one silently
      * receives nothing.
+     *
+     * Upload progress only reports for a file-backed body (`asRequestBody(File)`, or a multipart
+     * part built from one); a `String`/`ByteArray` body, including [post]'s `json` overload,
+     * reports nothing on the way up. Download progress always reports.
      */
     fun progress(sink: MutableSharedFlow<Progress>): Requester
 

@@ -158,6 +158,12 @@ the upload completes before the download starts, so nothing needs to say which p
 belongs to. A body of unknown length reports progress but never reaches its total, since none is
 known, and a retried upload counts from zero again.
 
+Upload progress only reports for a file-backed body: `asRequestBody(File)`, or a multipart part
+built from one. A body built from a `String` or `ByteArray`, including the `post(url, json)`
+convenience, is small enough to sit fully in memory, and reporting it would jump the sink straight
+to full before resetting for the download that follows, so it is left out. Download progress has
+no such gate and always reports.
+
 Build the sink with `extraBufferCapacity > 0`. A default `MutableSharedFlow<Progress>()` has no
 buffer space, and its `tryEmit` returns `false` for every update, so it silently reports nothing.
 
