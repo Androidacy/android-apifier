@@ -310,10 +310,56 @@ class ProtectedDomainCheckTest {
     }
 
     @Test
+    fun resolverThrowingOutsideIoReachesATerminalStatus() {
+        val check = checkOver(
+            listOf(
+                FakeResolver(trust) { throw IllegalStateException("resolver blew up") },
+                answering("1.1.1.1"),
+                answering("1.1.1.1")
+            ),
+            system = listOf("1.1.1.1")
+        )
+
+        check.start()
+        executor.runAll()
+
+        assertEquals(TrustStatus.ERROR, check.status(HOST))
+    }
+
+    @Test
+    fun systemResolveThrowingOutsideIoReachesATerminalStatus() {
+        val check = ProtectedDomainCheck(
+            listOf(HOST),
+            listOf(answering("1.1.1.1"), answering("1.1.1.1"), answering("1.1.1.1")),
+            { throw IllegalStateException("resolver blew up") },
+            executor,
+            { now }
+        )
+
+        check.start()
+        executor.runAll()
+
+        assertEquals(TrustStatus.ERROR, check.status(HOST))
+    }
+
+    @Test
     fun unsafeProtectedDomainRejected() {
         assertThrows(IllegalArgumentException::class.java) {
             ProtectedDomainCheck(
                 listOf("evil host!"),
+                listOf(answering("1.1.1.1")),
+                { listOf("1.1.1.1") },
+                executor,
+                { now }
+            )
+        }
+    }
+
+    @Test
+    fun trailingDotProtectedDomainRejected() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ProtectedDomainCheck(
+                listOf("api.example.com."),
                 listOf(answering("1.1.1.1")),
                 { listOf("1.1.1.1") },
                 executor,

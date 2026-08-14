@@ -74,4 +74,12 @@ class AddressClassifierTest {
         assertFalse(AddressClassifier.isSafeHostname("example.com/path"))
         assertFalse(AddressClassifier.isSafeHostname(""))
     }
+
+    @Test
+    fun safeHostnameRejectsWhatTheWireCodecCannotEncode() {
+        assertFalse("a trailing dot leaves an empty label", AddressClassifier.isSafeHostname("example.com."))
+        assertFalse(AddressClassifier.isSafeHostname(".example.com"))
+        assertFalse(AddressClassifier.isSafeHostname("a..b"))
+        assertFalse(AddressClassifier.isSafeHostname("${"a".repeat(64)}.example.com"))
+    }
 }

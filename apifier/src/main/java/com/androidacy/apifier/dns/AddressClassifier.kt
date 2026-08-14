@@ -33,7 +33,7 @@ enum class AddressCategory {
 /** Classifies IP literals and validates host strings without ever resolving a name. */
 object AddressClassifier {
 
-    private val SAFE_HOSTNAME = Regex("""^[a-zA-Z0-9._-]+$""")
+    private val SAFE_HOSTNAME = Regex("""^[a-zA-Z0-9_-]{1,63}(\.[a-zA-Z0-9_-]{1,63})*$""")
     private val IPV4_PATTERN = Regex("""\d{1,3}(\.\d{1,3}){3}""")
 
     /**
@@ -62,7 +62,12 @@ object AddressClassifier {
         return ':' in stripped
     }
 
-    /** True when [host] contains only characters safe to pass through host-scoped plumbing. */
+    /**
+     * True when [host] is safe to pass through host-scoped plumbing: only unreserved characters,
+     * and every label 1 to 63 bytes. The label rule matches what [DnsWireCodec.buildQuery]
+     * accepts, so a hostname that passes here can always be turned into a query; a trailing dot
+     * is rejected by both rather than by one of them.
+     */
     fun isSafeHostname(host: String): Boolean = SAFE_HOSTNAME.matches(host)
 
     /**
