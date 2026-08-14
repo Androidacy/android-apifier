@@ -34,6 +34,7 @@ import com.androidacy.apifier.http.Response
 import com.androidacy.apifier.http.ResponseBody
 import com.androidacy.apifier.http.ResponseBody.Companion.asResponseBody
 import com.androidacy.apifier.http.ResponseBody.Companion.toResponseBody
+import com.androidacy.apifier.http.bytes
 import com.androidacy.apifier.observe.Observation
 import com.androidacy.apifier.observe.RequestEvent
 import com.androidacy.apifier.progress.Progress
@@ -393,7 +394,7 @@ class PipelineTest {
         val response =
             pipeline.executeBlocking(request().build(), CallOptions(callTimeoutMillis = 300), PipelineCall())
         val started = System.nanoTime()
-        assertThrows(ApifierException.CallTimeout::class.java) { response.body.bytes() }
+        assertThrows(ApifierException.CallTimeout::class.java) { runBlocking { response.body.bytes() } }
         val elapsedMs = (System.nanoTime() - started) / 1_000_000
 
         assertTrue("body failed after ${elapsedMs}ms", elapsedMs < 3_000)
@@ -869,6 +870,7 @@ class PipelineTest {
 
         override fun contentLength(): Long = payload.size
 
+        @Suppress("OVERRIDE_DEPRECATION")
         override fun source(): BufferedSource = payload
 
         override fun close() {

@@ -22,6 +22,8 @@ import com.androidacy.apifier.http.ErrorCode
 import com.androidacy.apifier.http.Headers
 import com.androidacy.apifier.http.Request
 import com.androidacy.apifier.http.Response
+import com.androidacy.apifier.http.bytes
+import com.androidacy.apifier.http.string
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.asCoroutineDispatcher
@@ -241,7 +243,7 @@ class CronetCallTest {
 
         val response = harness.callback.responses.single()
         assertEquals(0L, response.body.contentLength())
-        assertEquals(0, response.body.bytes().size)
+        assertEquals(0, runBlocking { response.body.bytes() }.size)
     }
 
     @Test
@@ -254,7 +256,7 @@ class CronetCallTest {
             info(status = 204, headers = listOf("Content-Length" to "42"))
         )
 
-        assertEquals(0, harness.callback.responses.single().body.bytes().size)
+        assertEquals(0, runBlocking { harness.callback.responses.single().body.bytes() }.size)
     }
 
     @Test
@@ -349,7 +351,7 @@ class CronetCallTest {
         val response = harness.call.execute()
 
         assertEquals(200, response.code)
-        assertEquals("ok", response.body.string())
+        assertEquals("ok", runBlocking { response.body.string() })
     }
 
     @Test
@@ -384,7 +386,7 @@ class CronetCallTest {
         val response = runBlocking { withTimeout(AWAIT_TIMEOUT_MS) { harness.call.await() } }
 
         assertEquals(200, response.code)
-        assertEquals("ok", response.body.string())
+        assertEquals("ok", runBlocking { response.body.string() })
         // A terminal path taken after the response was handed over must not resume again; a
         // second resume throws out of here, on this thread.
         harness.call.cancel()

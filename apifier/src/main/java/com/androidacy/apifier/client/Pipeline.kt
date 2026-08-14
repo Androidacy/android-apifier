@@ -587,8 +587,11 @@ private class BudgetedBody(
 
     override fun contentLength(): Long = body.contentLength()
 
-    override fun source(): BufferedSource =
-        bounded ?: bounding(body.source()).buffer().also { bounded = it }
+    @Suppress("OVERRIDE_DEPRECATION")
+    override fun source(): BufferedSource {
+        @Suppress("DEPRECATION")
+        return bounded ?: bounding(body.source()).buffer().also { bounded = it }
+    }
 
     override fun close() {
         disarm()
@@ -635,8 +638,11 @@ internal class ProgressBody(
 
     override fun contentLength(): Long = body.contentLength()
 
-    override fun source(): BufferedSource =
-        counted ?: counting(body.source()).buffer().also { counted = it }
+    @Suppress("OVERRIDE_DEPRECATION")
+    override fun source(): BufferedSource {
+        @Suppress("DEPRECATION")
+        return counted ?: counting(body.source()).buffer().also { counted = it }
+    }
 
     private fun counting(source: Source): Source = object : ForwardingSource(source) {
         override fun read(sink: Buffer, byteCount: Long): Long {

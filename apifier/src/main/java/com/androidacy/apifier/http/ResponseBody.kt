@@ -17,6 +17,8 @@ package com.androidacy.apifier.http
 
 import java.io.Closeable
 import java.io.InputStream
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okio.Buffer
 import okio.BufferedSource
 
@@ -35,23 +37,23 @@ abstract class ResponseBody : Closeable {
     /** The length announced by the response, or -1 when the length was not known. */
     abstract fun contentLength(): Long
 
+    @Deprecated(
+        "Blocks the calling thread when read. Use ResponseBody.bytes() or ResponseBody.string() " +
+            "for a suspending whole-body read. Removed in 4.0."
+    )
     abstract fun source(): BufferedSource
 
-    fun byteStream(): InputStream = source().inputStream()
-
-    /** Reads the body to its end and closes it. */
-    fun bytes(): ByteArray = use { it.source().readByteArray() }
-
-    /**
-     * Reads the body to its end as text and closes it, decoding with the charset of
-     * [contentType] and UTF-8 when it names none.
-     */
-    fun string(): String {
-        val charset = contentType()?.charset ?: Charsets.UTF_8
-        return use { it.source().readString(charset) }
+    @Deprecated(
+        "Blocks the calling thread when read. Use ResponseBody.bytes() or ResponseBody.string() " +
+            "for a suspending whole-body read. Removed in 4.0."
+    )
+    fun byteStream(): InputStream {
+        @Suppress("DEPRECATION")
+        return source().inputStream()
     }
 
     override fun close() {
+        @Suppress("DEPRECATION")
         source().close()
     }
 
@@ -72,8 +74,27 @@ abstract class ResponseBody : Closeable {
 
                 override fun contentLength(): Long = contentLength
 
+                @Suppress("OVERRIDE_DEPRECATION")
                 override fun source(): BufferedSource = source
             }
         }
+    }
+}
+
+/** Reads the body to its end on [Dispatchers.IO] and closes it. */
+suspend fun ResponseBody.bytes(): ByteArray = withContext(Dispatchers.IO) {
+    @Suppress("DEPRECATION")
+    use { it.source().readByteArray() }
+}
+
+/**
+ * Reads the body to its end as text on [Dispatchers.IO] and closes it, decoding with the
+ * charset of [ResponseBody.contentType] and UTF-8 when it names none.
+ */
+suspend fun ResponseBody.string(): String {
+    val charset = contentType()?.charset ?: Charsets.UTF_8
+    return withContext(Dispatchers.IO) {
+        @Suppress("DEPRECATION")
+        use { it.source().readString(charset) }
     }
 }

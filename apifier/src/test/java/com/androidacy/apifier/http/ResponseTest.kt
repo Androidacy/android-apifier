@@ -18,12 +18,14 @@ package com.androidacy.apifier.http
 import com.androidacy.apifier.http.MediaType.Companion.toMediaTypeOrNull
 import com.androidacy.apifier.http.ResponseBody.Companion.asResponseBody
 import com.androidacy.apifier.http.ResponseBody.Companion.toResponseBody
+import kotlinx.coroutines.test.runTest
 import okio.Buffer
 import okio.ForwardingSource
 import okio.buffer
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -33,7 +35,7 @@ import org.robolectric.RobolectricTestRunner
 class ResponseTest {
 
     @Test
-    fun responseBuilderDefaultsEmptyBody() {
+    fun responseBuilderDefaultsEmptyBody() = runTest {
         val response = newBuilder().build()
 
         assertEquals(0L, response.body.contentLength())
@@ -67,13 +69,65 @@ class ResponseTest {
     }
 
     @Test
-    fun stringReadsWithTheCharsetOfTheContentType() {
+    fun suspendBytesReadsTheWholeBody() = runTest {
+        val payload = ByteArray(30) { it.toByte() }
+        val response = newBuilder().body(payload.toResponseBody()).build()
+
+        assertArrayEquals(payload, response.body.bytes())
+    }
+
+    @Test
+    fun suspendStringDecodesWithTheContentTypeCharset() = runTest {
         val bytes = "héllo".toByteArray(Charsets.ISO_8859_1)
         val response = newBuilder()
             .body(bytes.toResponseBody("text/plain; charset=iso-8859-1".toMediaTypeOrNull()))
             .build()
 
         assertEquals("héllo", response.body.string())
+    }
+
+    @Test
+    fun suspendAccessorsRunOffTheCallingThread() = runTest {
+        var readThread: Thread? = null
+        val source = object : ForwardingSource(Buffer().writeUtf8("hello")) {
+            override fun read(sink: Buffer, byteCount: Long): Long {
+                readThread = Thread.currentThread()
+                return super.read(sink, byteCount)
+            }
+        }.buffer()
+        val response = newBuilder().body(source.asResponseBody(null, 5L)).build()
+        val callingThread = Thread.currentThread()
+
+        response.body.bytes()
+
+        assertNotEquals(callingThread, readThread)
+    }
+
+    @Test
+    fun bodyIsClosedAfterASuspendRead() = runTest {
+        var closed = false
+        val source = object : ForwardingSource(Buffer().writeUtf8("hello")) {
+            override fun close() {
+                closed = true
+                super.close()
+            }
+        }.buffer()
+        val response = newBuilder().body(source.asResponseBody(null, 5L)).build()
+
+        response.body.bytes()
+
+        assertTrue(closed)
+    }
+
+    @Test
+    fun readingTwiceFails() = runTest {
+        val payload = "hello".toByteArray()
+        val response = newBuilder().body(payload.toResponseBody()).build()
+
+        response.body.bytes()
+        val second = response.body.bytes()
+
+        assertFalse("a second read replayed the already-consumed body", second.contentEquals(payload))
     }
 
     @Test
