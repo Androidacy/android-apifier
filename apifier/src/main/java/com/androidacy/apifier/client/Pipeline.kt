@@ -113,6 +113,16 @@ internal class PipelineCall {
     @Volatile
     var terminalEventEmitted: Boolean = false
 
+    /**
+     * Runs once the response body is finished, whether it was drained, closed or failed. The
+     * body outlives [Pipeline.execute], so an owner that accounts for calls in flight cannot
+     * treat the return as the end of one.
+     */
+    @Volatile
+    var onBodyFinished: (() -> Unit)? = null
+
+    private val bodyFinished = AtomicBoolean(false)
+
     val isCanceled: Boolean get() = canceled.get()
 
     /** True once the call-timeout task fired, which outranks whatever the transport then reports. */
@@ -124,6 +134,11 @@ internal class PipelineCall {
 
     fun markTimedOut() {
         timedOut.set(true)
+    }
+
+    /** Called from every path that ends the body, so it has to tolerate being called again. */
+    fun finishBody() {
+        if (bodyFinished.compareAndSet(false, true)) onBodyFinished?.invoke()
     }
 }
 
@@ -570,6 +585,7 @@ private class BudgetedBody(
 
     private fun disarm() {
         timeoutTask.cancel(false)
+        call.finishBody()
     }
 
     private fun bounding(source: Source): Source = object : ForwardingSource(source) {

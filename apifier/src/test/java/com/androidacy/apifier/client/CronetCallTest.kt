@@ -359,6 +359,19 @@ class CronetCallTest {
         assertTrue(callback.failures.single() is ApifierException.Cancelled)
     }
 
+    @Test
+    fun cancelBeforeEnqueueStillReportsTheTransfer() {
+        val listener = RecordingListener()
+        val harness = Harness(listener = listener)
+        harness.call.cancel()
+
+        harness.call.enqueue(RecordingCallback())
+
+        // No UrlRequest ran, so nothing else will ever complete the transfer, and a listener that
+        // defers work until it does would keep waiting.
+        assertEquals(listOf(0L to 0L), listener.transfers)
+    }
+
     private class Harness(
         method: String = "GET",
         listener: TransportListener? = null,

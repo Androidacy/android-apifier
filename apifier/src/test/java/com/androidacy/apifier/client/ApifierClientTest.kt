@@ -162,6 +162,7 @@ class ApifierClientTest {
     fun closeIsIdempotentAndCallsAfterCloseFail() {
         val engine = FakeEngine()
         val client = clientOf(engine)
+        val prepared = client.call(Request.Builder().url(URL).get().build())
 
         client.close()
         client.close()
@@ -170,6 +171,86 @@ class ApifierClientTest {
         assertThrows(IllegalStateException::class.java) {
             client.call(Request.Builder().url(URL).get().build())
         }
+        // A call handed out before close still holds a scheduler and an engine that are gone.
+        assertThrows(IllegalStateException::class.java) {
+            prepared.enqueue(countingCallback(CountDownLatch(1)))
+        }
+        assertThrows(IllegalStateException::class.java) {
+            @Suppress("DEPRECATION")
+            prepared.execute()
+        }
+    }
+
+    @Test
+    fun closeReachesACallWhoseBodyOutlivedItsCallback() {
+        val engine = FakeEngine()
+        val client = clientOf(engine)
+        val streaming = AtomicReference<Response?>()
+        val delivered = CountDownLatch(1)
+        client.get(
+            URL,
+            object : Callback {
+                override fun onResponse(call: Call, response: Response) {
+                    streaming.set(response)
+                    delivered.countDown()
+                }
+
+                override fun onFailure(call: Call, e: IOException) = delivered.countDown()
+            }
+        )
+        assertTrue(delivered.await(10, TimeUnit.SECONDS))
+        thread(isDaemon = true) {
+            Thread.sleep(300)
+            streaming.get()?.close()
+        }
+
+        val startedAt = System.nanoTime()
+        client.close()
+        val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+
+        assertEquals(listOf("cancel", "shutdown"), engine.log)
+        assertTrue("close returned after ${elapsedMs}ms", elapsedMs in 250..4_000)
+    }
+
+    @Test
+    fun closeFromAClientCallbackIsRefused() {
+        val engine = FakeEngine()
+        val client = clientOf(engine)
+        val thrown = AtomicReference<Throwable?>()
+        val done = CountDownLatch(1)
+        client.get(
+            URL,
+            object : Callback {
+                override fun onResponse(call: Call, response: Response) {
+                    response.close()
+                    thrown.set(runCatching { client.close() }.exceptionOrNull())
+                    done.countDown()
+                }
+
+                override fun onFailure(call: Call, e: IOException) = done.countDown()
+            }
+        )
+
+        assertTrue(done.await(10, TimeUnit.SECONDS))
+        assertTrue("got ${thrown.get()}", thrown.get() is IllegalStateException)
+        client.close()
+        assertEquals(listOf("shutdown"), engine.log)
+    }
+
+    @Test
+    fun closeFinishesEveryStepWhenOneThrows() {
+        val engine = FakeEngine(shutdownThrows = true)
+        val client = clientOf(engine)
+        val events = Collections.synchronizedList(mutableListOf<RequestEvent>())
+        client.addObserver { events.add(it) }
+        val done = CountDownLatch(1)
+        client.get(URL, countingCallback(done))
+        assertTrue(done.await(10, TimeUnit.SECONDS))
+
+        client.close()
+
+        assertEquals(listOf("shutdown"), engine.log)
+        assertEquals(1, events.size)
     }
 
     @Test
@@ -268,6 +349,7 @@ class ApifierClientTest {
     /** Records the teardown order the client drives, and every request that reached it. */
     private inner class FakeEngine(
         private val hang: Boolean = false,
+        private val shutdownThrows: Boolean = false,
         private val respond: (Request) -> Response = { response(it) }
     ) : ClientEngine {
 
@@ -288,6 +370,7 @@ class ApifierClientTest {
 
         override fun shutdown() {
             record("shutdown")
+            if (shutdownThrows) throw IllegalStateException("engine refused")
         }
 
         fun record(entry: String) {

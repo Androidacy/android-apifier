@@ -114,6 +114,9 @@ internal class CronetCall(
 
         if (canceled.get()) {
             deliverFailure(ApifierException.Cancelled())
+            // No UrlRequest was ever started, so no onCanceled is coming to report the transfer.
+            // Without this the listener's completion never fires and whatever it defers is lost.
+            reportTransfer()
             return
         }
 

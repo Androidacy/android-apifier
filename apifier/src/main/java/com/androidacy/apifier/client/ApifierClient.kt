@@ -206,6 +206,8 @@ class ApifierClient internal constructor(
 
     private val closed = AtomicBoolean(false)
 
+    private val inCallback: ThreadLocal<Boolean> = ThreadLocal.withInitial { false }
+
     /**
      * Provider selection outcome in ladder order. Keys are `name:version`, values are the
      * `HttpClientBuilder.PROVIDER_*` statuses.
@@ -221,7 +223,7 @@ class ApifierClient internal constructor(
      * @throws IllegalStateException the client is closed.
      */
     fun call(request: Request, options: CallOptions = CallOptions()): Call {
-        check(!closed.get()) { "client is closed" }
+        check(!closed.get()) { CLOSED_MESSAGE }
         val effective =
             if (request.tag(NoRetry::class.java) == null) options else options.copy(maxAttempts = 1)
         return ClientCall(request, effective)
@@ -311,30 +313,40 @@ class ApifierClient internal constructor(
         trustCheck?.status(host) ?: TrustStatus.UNKNOWN
 
     /**
-     * Releases the engine, the pools and the network callback. Idempotent, and safe to call from
-     * any thread other than one running a callback from this client.
+     * Releases the engine, the pools and the network callback. Idempotent.
      *
      * In-flight calls are cancelled and awaited first, because the engine refuses to shut down
      * while a request is active. Observation stops last so events from those cancellations are
      * delivered before this returns.
+     *
+     * @throws IllegalStateException called from a callback this client is running. That thread
+     * is one of the calls close has to wait for, so it would drain against itself, be interrupted
+     * out of the drain, and lose the pending events.
      */
     override fun close() {
+        check(!inCallback.get()) { "close() must not be called from a callback of this client" }
         if (!closed.compareAndSet(false, true)) return
 
-        networkCallback?.let { callback ->
-            runCatching { connectivity?.unregisterNetworkCallback(callback) }
+        // Steps are independent, and a second close() returns at the guard above: one that throws
+        // must not take the rest of the teardown with it.
+        teardown {
+            networkCallback?.let { callback -> connectivity?.unregisterNetworkCallback(callback) }
         }
-        inFlight.forEach { it.cancel() }
+        teardown { inFlight.forEach { it.cancel() } }
         // Ahead of the drain, since this releases a call parked on a verdict that is never
         // coming; waiting for it would spend the whole trust budget inside close.
-        trustCheck?.shutdown()
-        trustExecutor?.shutdownNow()
-        drainCalls()
+        teardown { trustCheck?.shutdown() }
+        teardown { trustExecutor?.shutdownNow() }
+        teardown { drainCalls() }
         // A response body the consumer never closed still holds its call-budget task, so an
         // orderly shutdown here would wait out the whole budget for nothing.
-        scheduler.shutdownNow()
-        engine.shutdown()
-        observation.close()
+        teardown { scheduler.shutdownNow() }
+        teardown { engine.shutdown() }
+        teardown { observation.close() }
+    }
+
+    private fun teardown(step: () -> Unit) {
+        runCatching(step)
     }
 
     private fun drainCalls() {
@@ -357,7 +369,12 @@ class ApifierClient internal constructor(
     private fun enqueue(request: Request, callback: Callback): Call =
         call(request).also { it.enqueue(callback) }
 
-    /** One logical call: a pipeline run the client can cancel and account for while it is in flight. */
+    /**
+     * One logical call: a pipeline run the client can cancel and account for while it is in
+     * flight. A call counts as in flight until the pipeline fails or its response body ends,
+     * which is later than the consumer callback returns and is what [close] has to reach: the
+     * engine stays active for as long as the body is streaming.
+     */
     private inner class ClientCall(
         private val request: Request,
         private val options: CallOptions
@@ -366,11 +383,14 @@ class ApifierClient internal constructor(
         private val state = PipelineCall()
         private val started = AtomicBoolean(false)
 
+        init {
+            state.onBodyFinished = { inFlight.remove(this) }
+        }
+
         override fun request(): Request = request
 
         override fun enqueue(callback: Callback) {
-            check(started.compareAndSet(false, true)) { "Call already enqueued" }
-            inFlight.add(this)
+            begin()
             try {
                 workers.execute { run(callback) }
             } catch (e: RejectedExecutionException) {
@@ -381,12 +401,12 @@ class ApifierClient internal constructor(
 
         @Deprecated("Blocking bridge over the async path; prefer enqueue.")
         override fun execute(): Response {
-            check(started.compareAndSet(false, true)) { "Call already enqueued" }
-            inFlight.add(this)
+            begin()
             try {
                 return pipeline.execute(request, options, state)
-            } finally {
+            } catch (e: Throwable) {
                 inFlight.remove(this)
+                throw e
             }
         }
 
@@ -394,18 +414,35 @@ class ApifierClient internal constructor(
 
         override fun isCanceled(): Boolean = state.isCanceled
 
+        private fun begin() {
+            check(started.compareAndSet(false, true)) { "Call already enqueued" }
+            // The scheduler and the engine are already down, so a run started here would fail
+            // somewhere unhelpful instead of at the call that should not have been made.
+            check(!closed.get()) { CLOSED_MESSAGE }
+            inFlight.add(this)
+        }
+
         private fun run(callback: Callback) {
-            try {
-                callback.onResponse(this, pipeline.execute(request, options, state))
-            } catch (e: IOException) {
-                callback.onFailure(this, e)
+            val response = try {
+                pipeline.execute(request, options, state)
             } catch (e: Throwable) {
+                inFlight.remove(this)
                 // The consumer is owed exactly one terminal callback. An interrupt during a
                 // shutdown, or any other non-IO failure, must not leave it waiting forever.
                 if (e is InterruptedException) Thread.currentThread().interrupt()
-                callback.onFailure(this, IOException(e))
+                dispatch { callback.onFailure(this, e as? IOException ?: IOException(e)) }
+                return
+            }
+            dispatch { callback.onResponse(this, response) }
+        }
+
+        /** Marks the thread as the client's own, so [close] can refuse the one caller it cannot serve. */
+        private fun dispatch(delivery: () -> Unit) {
+            inCallback.set(true)
+            try {
+                delivery()
             } finally {
-                inFlight.remove(this)
+                inCallback.set(false)
             }
         }
     }
@@ -413,6 +450,7 @@ class ApifierClient internal constructor(
     companion object {
         private const val DRAIN_TIMEOUT_MS = 5_000L
         private const val DRAIN_POLL_MS = 10L
+        private const val CLOSED_MESSAGE = "client is closed"
 
         operator fun invoke(context: Context, block: NetworkConfigBuilder.() -> Unit): ApifierClient {
             val config = NetworkConfigBuilder().apply(block).build()
