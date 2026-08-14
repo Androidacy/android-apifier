@@ -339,42 +339,6 @@ class CronetCallTest {
     }
 
     @Test
-    fun executeBridgesAsyncResult() {
-        val harness = Harness()
-        harness.urlRequest.onStart = {
-            harness.cronetCallback.onResponseStarted(harness.urlRequest, info())
-            harness.readCompleted("ok")
-            harness.cronetCallback.onSucceeded(harness.urlRequest, info())
-        }
-
-        @Suppress("DEPRECATION")
-        val response = harness.call.execute()
-
-        assertEquals(200, response.code)
-        assertEquals("ok", runBlocking { response.body.string() })
-    }
-
-    @Test
-    fun executeRethrowsFailure() {
-        val harness = Harness()
-        harness.urlRequest.onStart = {
-            harness.cronetCallback.onFailed(
-                harness.urlRequest,
-                info(),
-                FakeNetworkException(NetworkException.ERROR_HOSTNAME_NOT_RESOLVED)
-            )
-        }
-
-        try {
-            @Suppress("DEPRECATION")
-            harness.call.execute()
-            fail("expected the transport failure to be rethrown")
-        } catch (e: IOException) {
-            assertEquals(ErrorCode.HOSTNAME_NOT_RESOLVED, (e as ApifierException).errorCode)
-        }
-    }
-
-    @Test
     fun awaitResumesOnceWithTheResponse() {
         val harness = Harness()
         harness.urlRequest.onStart = {

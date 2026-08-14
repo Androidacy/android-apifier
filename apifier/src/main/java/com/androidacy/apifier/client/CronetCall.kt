@@ -26,7 +26,6 @@ import com.androidacy.apifier.http.Response
 import com.androidacy.apifier.http.ResponseBody.Companion.asResponseBody
 import com.androidacy.apifier.http.ResponseBody.Companion.toResponseBody
 import com.androidacy.apifier.http.toApifierException
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okio.Buffer
 import okio.buffer
@@ -64,14 +63,13 @@ internal fun interface UrlRequestFactory {
  * arms the next read only after `onResponseStarted` returns, so a consumer that drains the body
  * inside `onResponse` would wait for bytes that cannot arrive until it yields.
  */
-@Suppress("DEPRECATION")
 internal class CronetCall(
     private val request: Request,
     readTimeoutMs: Long,
     private val listener: TransportListener?,
     private val deliveryExecutor: Executor,
     private val urlRequestFactory: UrlRequestFactory
-) : AttemptCall, Call {
+) : AttemptCall {
 
     private companion object {
         const val MAX_REDIRECTS = 20
@@ -106,13 +104,24 @@ internal class CronetCall(
     private val cookieScopeHost: String? =
         if (request.header("Cookie") == null) null else request.uri.host?.lowercase()
 
-    override fun request(): Request = request
+    fun request(): Request = request
 
-    @Deprecated(
-        "Launch the suspend fun send() on a coroutine of your own instead of a Callback. " +
-            "Will be removed in 4.0."
-    )
-    override fun enqueue(callback: Callback) {
+    /**
+     * [Callback.onResponse] and [Callback.onFailure] still take a [Call], a constraint of the
+     * public interface this class no longer implements. Neither this class's own callers nor the
+     * pipeline's ever read that argument, so an inert stand-in satisfies the signature without
+     * extending the deleted conformance back onto [CronetCall] itself.
+     */
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    private val callHandle: Call = object : Call {
+        override fun request(): Request = this@CronetCall.request()
+        override fun enqueue(callback: Callback) = throw UnsupportedOperationException()
+        override fun execute(): Response = throw UnsupportedOperationException()
+        override fun cancel() = throw UnsupportedOperationException()
+        override fun isCanceled(): Boolean = throw UnsupportedOperationException()
+    }
+
+    fun enqueue(callback: Callback) {
         check(enqueued.compareAndSet(false, true)) { "Call already enqueued" }
         this.callback = callback
 
@@ -148,12 +157,6 @@ internal class CronetCall(
         })
     }
 
-    @Deprecated(
-        "Blocking bridge over the suspend fun send(); call it from a coroutine instead. " +
-            "Will be removed in 4.0."
-    )
-    override fun execute(): Response = runBlocking { await() }
-
     override fun cancel() {
         if (!canceled.compareAndSet(false, true)) return
         urlRequest.get()?.cancel()
@@ -162,23 +165,19 @@ internal class CronetCall(
         deliverFailure(cancellation)
     }
 
-    @Deprecated(
-        "Cancellation state now belongs to the coroutine send() runs on, not this call. " +
-            "Will be removed in 4.0."
-    )
-    override fun isCanceled(): Boolean = canceled.get()
+    fun isCanceled(): Boolean = canceled.get()
 
     private fun deliverResponse(response: Response) {
         val target = callback ?: return
         if (delivered.compareAndSet(false, true)) {
-            deliver { target.onResponse(this, response) }
+            deliver { target.onResponse(callHandle, response) }
         }
     }
 
     private fun deliverFailure(e: IOException) {
         val target = callback ?: return
         if (delivered.compareAndSet(false, true)) {
-            deliver { target.onFailure(this, e) }
+            deliver { target.onFailure(callHandle, e) }
         }
     }
 

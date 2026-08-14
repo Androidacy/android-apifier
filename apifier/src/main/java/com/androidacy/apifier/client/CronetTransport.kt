@@ -16,7 +16,6 @@
 package com.androidacy.apifier.client
 
 import android.net.Uri
-import com.androidacy.apifier.http.Call
 import com.androidacy.apifier.http.Headers
 import com.androidacy.apifier.http.Request
 import org.chromium.net.CronetEngine
@@ -31,19 +30,16 @@ import java.util.concurrent.atomic.AtomicLong
  * Each call is a single attempt. Retries, cookies and observation are layered above the
  * transport and reach it through [TransportListener].
  */
-@Suppress("DEPRECATION")
 internal class CronetTransport(
     private val engine: CronetEngine,
     private val readTimeoutMs: Long,
     private val executor: ExecutorService = Executors.newCachedThreadPool { runnable ->
         Thread(runnable, "Cronet-IO").apply { isDaemon = true }
     }
-) : Call.Factory {
+) {
 
     /** Label for the engine serving these calls, reported with observation events. */
     val provider: String = engine.versionString
-
-    override fun newCall(request: Request): Call = newCall(request, null)
 
     internal fun newCall(request: Request, listener: TransportListener?): CronetCall =
         CronetCall(request, readTimeoutMs, listener, executor) { callback, bytesSent ->

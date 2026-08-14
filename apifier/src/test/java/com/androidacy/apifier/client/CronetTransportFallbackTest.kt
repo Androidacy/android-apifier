@@ -67,7 +67,7 @@ class CronetTransportFallbackTest {
             val failure = AtomicReference<IOException?>()
             val response = AtomicReference<Response?>()
             val done = CountDownLatch(1)
-            transport.newCall(request).enqueue(object : Callback {
+            transport.newCall(request, null).enqueue(object : Callback {
                 override fun onResponse(call: Call, response1: Response) {
                     response1.close()
                     response.set(response1)
