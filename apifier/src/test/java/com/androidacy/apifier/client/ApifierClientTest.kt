@@ -404,7 +404,7 @@ class ApifierClientTest {
         val engine = CronetClientEngine(cronet, emptyMap(), READ_TIMEOUT_MS)
         val server = ServerSocket(0)
         val accepted = CountDownLatch(1)
-        thread(isDaemon = true) { runCatching { server.accept() }.also { accepted.countDown() } }
+        thread(isDaemon = true) { runCatching { server.accept() }.onSuccess { accepted.countDown() } }
         val client = ApifierClient(context, NetworkConfig(), engine)
 
         val done = CountDownLatch(1)

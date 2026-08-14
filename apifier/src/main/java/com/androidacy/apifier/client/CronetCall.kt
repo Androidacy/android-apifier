@@ -111,8 +111,6 @@ internal class CronetCall(
     private val cookieScopeHost: String? =
         if (request.header("Cookie") == null) null else request.uri.host?.lowercase()
 
-    fun request(): Request = request
-
     fun enqueue(outcome: CallOutcome) {
         check(enqueued.compareAndSet(false, true)) { "Call already enqueued" }
         this.outcome = outcome
@@ -156,8 +154,6 @@ internal class CronetCall(
         deliverFailure(cancellation)
     }
 
-    fun isCanceled(): Boolean = canceled.get()
-
     private fun deliverResponse(response: Response) {
         val target = outcome ?: return
         if (delivered.compareAndSet(false, true)) {
@@ -172,14 +168,14 @@ internal class CronetCall(
         }
     }
 
-    private fun deliver(outcome: () -> Unit) {
+    private fun deliver(delivery: () -> Unit) {
         try {
-            deliveryExecutor.execute(outcome)
+            deliveryExecutor.execute(delivery)
         } catch (_: RejectedExecutionException) {
             // The transport shut down between claiming the delivery and handing it off. The
             // claim cannot be given back, so running here is the last path to a terminal
             // callback; the alternative is a consumer that waits forever.
-            outcome()
+            delivery()
         }
     }
 

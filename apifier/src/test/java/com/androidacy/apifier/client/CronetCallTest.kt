@@ -198,7 +198,6 @@ class CronetCallTest {
         assertEquals(1, harness.urlRequest.canceled)
         assertEquals(1, harness.callback.failures.size)
         assertTrue(harness.callback.failures[0] is ApifierException.Cancelled)
-        assertTrue(harness.call.isCanceled())
     }
 
     @Test
@@ -387,7 +386,6 @@ class CronetCallTest {
         awaitUntil("cancelling the coroutine never reached the UrlRequest") {
             harness.urlRequest.canceled == 1
         }
-        assertTrue(harness.call.isCanceled())
     }
 
     @Test

@@ -249,7 +249,7 @@ class ApifierClient internal constructor(
         // catches that interleaving; the other one is caught by the sweep itself.
         if (closed.get()) {
             inFlight.remove(state)
-            throw ApifierException.Cancelled()
+            error(CLOSED_MESSAGE)
         }
         return try {
             pipeline.execute(request, options, state)
@@ -508,7 +508,7 @@ class ApifierClient internal constructor(
             // against an inFlight that did not contain this state yet.
             if (closed.get()) {
                 inFlight.remove(state)
-                throw ApifierException.Cancelled()
+                error(CLOSED_MESSAGE)
             }
         }
 
