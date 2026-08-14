@@ -214,6 +214,12 @@ class ApifierClient internal constructor(
     private val inCallback: ThreadLocal<Boolean> = ThreadLocal.withInitial { false }
 
     /**
+     * Test-only seam: fires right before a call registers itself in [inFlight], so the test suite
+     * can run a real [close] in that exact gap without a wall-clock race.
+     */
+    internal var beforeInFlightRegistration: (() -> Unit)? = null
+
+    /**
      * Provider selection outcome in ladder order. Keys are `name:version`, values are the
      * `HttpClientBuilder.PROVIDER_*` statuses.
      */
@@ -243,7 +249,15 @@ class ApifierClient internal constructor(
         check(!closed.get()) { CLOSED_MESSAGE }
         val state = PipelineCall()
         state.onBodyFinished = { inFlight.remove(state) }
+        beforeInFlightRegistration?.invoke()
         inFlight.add(state)
+        // close() may have finished its inFlight sweep between the check above and this add,
+        // in which case nothing else is coming to cancel this call. Re-checking after the add
+        // catches that interleaving; the other one is caught by the sweep itself.
+        if (closed.get()) {
+            inFlight.remove(state)
+            throw ApifierException.Cancelled()
+        }
         return try {
             pipeline.execute(request, options, state)
         } catch (e: Throwable) {
@@ -496,7 +510,14 @@ class ApifierClient internal constructor(
         private fun begin() {
             check(started.compareAndSet(false, true)) { "Call already enqueued" }
             check(!closed.get()) { CLOSED_MESSAGE }
+            beforeInFlightRegistration?.invoke()
             inFlight.add(state)
+            // Same registration race as ApifierClient.send: close()'s sweep may have already run
+            // against an inFlight that did not contain this state yet.
+            if (closed.get()) {
+                inFlight.remove(state)
+                throw ApifierException.Cancelled()
+            }
         }
 
         private suspend fun run(callback: Callback) {

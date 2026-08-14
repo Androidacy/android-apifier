@@ -507,6 +507,66 @@ class ApifierClientTest {
         assertTrue("got ${delivered.get()}", delivered.get() is ApifierException)
     }
 
+    /**
+     * Drives the registration race deterministically: a real [ApifierClient.close] is run in the
+     * exact gap between `send`'s closed check and its `inFlight` registration, using the
+     * [ApifierClient.beforeInFlightRegistration] test seam instead of a wall-clock window. Fails
+     * if `send` skips the re-check after registering and runs the pipeline against a closed
+     * client instead of self-aborting.
+     */
+    @Test
+    fun sendSelfAbortsWhenCloseWinsTheRegistrationRace() {
+        val engine = FakeEngine()
+        val client = clientOf(engine)
+        client.beforeInFlightRegistration = {
+            client.beforeInFlightRegistration = null
+            client.close()
+        }
+
+        val thrown = assertThrows(ApifierException.Cancelled::class.java) {
+            runBlocking { client.send(getRequest(), CallOptions()) }
+        }
+
+        assertTrue(thrown is ApifierException.Cancelled)
+        assertTrue("pipeline reached the engine despite the race", engine.seen.isEmpty())
+    }
+
+    /** Same race as [sendSelfAbortsWhenCloseWinsTheRegistrationRace], at the deprecated `ClientCall.enqueue` entry point. */
+    @Test
+    @Suppress("DEPRECATION")
+    fun deprecatedEnqueueSelfAbortsWhenCloseWinsTheRegistrationRace() {
+        val engine = FakeEngine()
+        val client = clientOf(engine)
+        val call = client.call(getRequest())
+        client.beforeInFlightRegistration = {
+            client.beforeInFlightRegistration = null
+            client.close()
+        }
+        val outcome = AtomicReference<Throwable?>()
+        val done = CountDownLatch(1)
+
+        try {
+            call.enqueue(object : Callback {
+                override fun onResponse(call: Call, response: Response) {
+                    response.close()
+                    done.countDown()
+                }
+
+                override fun onFailure(call: Call, e: IOException) {
+                    outcome.set(e)
+                    done.countDown()
+                }
+            })
+        } catch (e: Throwable) {
+            outcome.set(e)
+            done.countDown()
+        }
+
+        assertTrue(done.await(10, TimeUnit.SECONDS))
+        assertTrue("got ${outcome.get()}", outcome.get() is ApifierException.Cancelled)
+        assertTrue("pipeline reached the engine despite the race", engine.seen.isEmpty())
+    }
+
     /** Fails if `Call.cancel()` stops tracking the launched job, e.g. by no longer reaching `PipelineCall.cancel()`. */
     @Test
     @Suppress("DEPRECATION")
