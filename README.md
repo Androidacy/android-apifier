@@ -19,7 +19,7 @@ HTTP and API networking library for Android, built directly on Cronet.
 - **Encrypted cookies**: public-suffix-scoped cookie jar backed by a pluggable store, AES-GCM
   encrypted with an Android Keystore key (StrongBox or TEE where the device has one). A device
   with no usable Keystore drops cookies instead of writing them in cleartext
-- **Streaming uploads**: multipart and single-file bodies stream from disk rather than loading into memory
+- **Streaming uploads**: multipart and single-file bodies stream from disk, never loading whole into memory
 - **Retry and circuit breaker**: exponential backoff with per-host breakers. Retries are off
   until you raise `maxAttempts`; the breakers are on by default
 - **DSL configuration**: Kotlin DSL for building a `NetworkConfig`

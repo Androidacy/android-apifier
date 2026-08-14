@@ -37,8 +37,8 @@ object AddressClassifier {
     private val IPV4_PATTERN = Regex("""\d{1,3}(\.\d{1,3}){3}""")
 
     /**
-     * The category of [ip]. Anything that does not parse as an IP literal is [AddressCategory.INVALID]
-     * rather than [AddressCategory.PUBLIC], so an unrecognized answer can never be read as routable.
+     * The category of [ip]. Anything that does not parse as an IP literal is
+     * [AddressCategory.INVALID], so an unrecognized answer can never be read as routable.
      */
     fun classify(ip: String): AddressCategory {
         val address = parseLiteral(ip) ?: return AddressCategory.INVALID

@@ -128,8 +128,7 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
             put("ho", cookie.hostOnly)
         }
         val plaintext = json.toString().toByteArray(Charsets.UTF_8)
-        // Fail closed: if encryption is unavailable, drop the cookie rather than
-        // persisting it in cleartext.
+        // Fail closed: an unavailable cipher drops the cookie. It is never persisted in cleartext.
         return encrypt(plaintext)
     }
 

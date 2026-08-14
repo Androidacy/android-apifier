@@ -44,7 +44,7 @@ class MediaType private constructor(
         /**
          * Parses [this] as a media type, or returns null when it is not `type/subtype` with
          * optional `; name=value` parameters. A `charset` parameter naming an encoding this
-         * JVM does not have leaves [charset] null rather than failing the whole parse.
+         * JVM does not have leaves [charset] null, and the rest of the parse still succeeds.
          */
         @JvmStatic
         @JvmName("parseOrNull")

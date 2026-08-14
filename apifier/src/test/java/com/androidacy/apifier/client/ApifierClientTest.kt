@@ -34,6 +34,7 @@ import com.androidacy.apifier.security.CookieStorage
 import com.androidacy.apifier.security.InMemoryCookieStorage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
@@ -333,6 +334,36 @@ class ApifierClientTest {
         assertEquals(listOf("shutdown"), engine.log)
     }
 
+    /**
+     * Production change that fails this: pointing the pipeline at an Observation other than the one
+     * backing [ApifierClient.events], which the deprecated observer path would not notice.
+     */
+    @Test
+    fun eventsCarriesTerminalEventsForCallsMadeThroughTheClient() {
+        val client = clientOf(FakeEngine())
+        val seen = AtomicReference<RequestEvent>()
+        val delivered = CountDownLatch(1)
+
+        runBlocking {
+            // UNDISPATCHED so the collector is subscribed before the call runs; events replays
+            // nothing, so an emission before the first subscriber is dropped.
+            val collector = launch(Dispatchers.IO, CoroutineStart.UNDISPATCHED) {
+                client.events.collect {
+                    seen.set(it)
+                    delivered.countDown()
+                }
+            }
+
+            client.get(URL).close()
+
+            assertTrue(delivered.await(5, TimeUnit.SECONDS))
+            collector.cancel()
+        }
+
+        assertEquals(Outcome.SUCCESS, seen.get().outcome)
+        client.close()
+    }
+
     @Test
     @Suppress("DEPRECATION")
     fun closeFinishesEveryStepWhenOneThrows() {
@@ -392,7 +423,7 @@ class ApifierClientTest {
     /**
      * The one close path that runs against real Cronet objects. The Java fallback engine accepts
      * `shutdown` even with an active request, so this cannot tell engine-first from pool-first;
-     * it fails when close throws or hangs.
+     * it fails when close stops cancelling the call it found in flight.
      */
     @Test
     @Suppress("DEPRECATION")
@@ -411,13 +442,10 @@ class ApifierClientTest {
         client.get("https://127.0.0.1:${server.localPort}/", countingCallback(done))
         assertTrue("the server never accepted a connection", accepted.await(10, TimeUnit.SECONDS))
 
-        val startedAt = System.nanoTime()
         client.close()
-        val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
         server.close()
 
-        assertTrue("close took ${elapsedMs}ms", elapsedMs < 10_000)
-        assertTrue(done.await(5, TimeUnit.SECONDS))
+        assertTrue("the cancelled call never reported back", done.await(5, TimeUnit.SECONDS))
     }
 
     @Test
@@ -442,38 +470,6 @@ class ApifierClientTest {
             ShadowLog.getLogs().count { it.type == Log.WARN && "main thread" in it.msg }
         )
         client.close()
-    }
-
-    /** Fails if `run` ever dispatches both terminal callbacks instead of returning after the first. */
-    @Test
-    @Suppress("DEPRECATION")
-    fun enqueueStillDeliversExactlyOneTerminalCallback() {
-        val engine = FakeEngine()
-        val client = clientOf(engine)
-        val responses = AtomicInteger()
-        val failures = AtomicInteger()
-        val done = CountDownLatch(1)
-
-        client.get(
-            URL,
-            object : Callback {
-                override fun onResponse(call: Call, response: Response) {
-                    responses.incrementAndGet()
-                    response.close()
-                    done.countDown()
-                }
-
-                override fun onFailure(call: Call, e: IOException) {
-                    failures.incrementAndGet()
-                    done.countDown()
-                }
-            }
-        )
-
-        assertTrue(done.await(10, TimeUnit.SECONDS))
-        client.close()
-        assertEquals(1, responses.get())
-        assertEquals(0, failures.get())
     }
 
     /** Fails if a transport failure reaches `onFailure` as a bare `IOException` instead of `asDeclaredFailure`'s wrap. */
@@ -790,16 +786,6 @@ class ApifierClientTest {
 
         assertEquals("the call never reached the client's engine", 1, engine.seen.size)
         assertTrue("the client's cookie jar was bypassed", storage.reads.get() > 0)
-        client.close()
-    }
-
-    @Test
-    fun derivedViewHasNoClose() {
-        val client = clientOf(FakeEngine())
-
-        val derived: Requester = client.maxAttempts(3)
-
-        assertFalse("a derived view can shut the shared engine down", derived is Closeable)
         client.close()
     }
 

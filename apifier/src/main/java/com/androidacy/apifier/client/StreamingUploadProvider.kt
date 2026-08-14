@@ -31,8 +31,8 @@ import org.chromium.net.UploadDataSink
  * more than one read's worth of body bytes at a time.
  *
  * A body with unknown length ([RequestBody.contentLength] of -1) uploads chunked and cannot
- * rewind, since there is no byte offset to resume replaying from; [rewind] reports that as a
- * rewind error rather than reusing a source that has already given bytes away.
+ * rewind, since there is no byte offset to resume replaying from; [rewind] reports a rewind
+ * error, because the only source available has already given its bytes away.
  */
 internal class StreamingUploadProvider(
     private val body: RequestBody,

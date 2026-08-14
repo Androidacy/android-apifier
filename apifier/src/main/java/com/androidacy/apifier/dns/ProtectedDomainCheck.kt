@@ -135,8 +135,8 @@ class ProtectedDomainCheck internal constructor(
 
     /**
      * `ERROR` and `FAIL` re-evaluate on the backoff schedule; `OK` stands until the network
-     * changes. Re-evaluation is triggered by whoever reads the status rather than by a timer,
-     * so this class owns no thread beyond the executor it was handed.
+     * changes. Whoever reads the status triggers re-evaluation, so this class owns no timer and
+     * no thread beyond the executor it was handed.
      */
     private fun scheduleIfDue(host: String, state: HostState) {
         if (stopped || state.status == TrustStatus.UNKNOWN || state.status == TrustStatus.OK) return
@@ -253,8 +253,8 @@ class ProtectedDomainCheck internal constructor(
 
         /**
          * Builds the check over cloudflare, google, and the AdGuard unfiltered endpoint in that
-         * role order. AdGuard's default endpoint sinkholes filtered domains, so it would answer
-         * with policy rather than with what the zone says and could not serve as a comparison.
+         * role order. AdGuard's default endpoint sinkholes filtered domains, so its answers carry
+         * policy instead of what the zone says, which makes it useless as a comparison.
          */
         fun production(
             context: Context,

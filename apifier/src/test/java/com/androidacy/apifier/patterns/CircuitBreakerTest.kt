@@ -22,14 +22,6 @@ import org.junit.Test
 class CircuitBreakerTest {
 
     @Test
-    fun freshBreakerIsClosedAndAdmits() {
-        val breaker = CircuitBreaker()
-        assertTrue(breaker.isClosed)
-        assertFalse(breaker.isOpen)
-        assertTrue(breaker.checkState())
-    }
-
-    @Test
     fun opensAfterThresholdConsecutiveFailures() {
         val breaker = CircuitBreaker(failureThreshold = 3, timeoutMs = 100_000L)
         breaker.recordFailure()

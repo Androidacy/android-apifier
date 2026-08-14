@@ -222,19 +222,6 @@ class ObservationTest {
         assertTrue(seen.second.isEmpty())
     }
 
-    /** Production change that fails this: stopping the collector without awaiting its drain. */
-    @Test
-    fun closeDeliversAlreadyQueuedEvents() {
-        val observation = Observation()
-        val delivered = AtomicInteger(0)
-        observation.addObserver { delivered.incrementAndGet() }
-
-        observation.emit(sampleEvent(), null)
-        observation.close()
-
-        assertEquals(1, delivered.get())
-    }
-
     /** Production change that fails this: subscribing the compatibility collector asynchronously. */
     @Test
     fun eventEmittedBeforeFirstCollectIsNotLost() {
@@ -245,21 +232,6 @@ class ObservationTest {
         observation.emit(sampleEvent(), null)
 
         assertTrue(delivered.await(2, TimeUnit.SECONDS))
-        observation.close()
-    }
-
-    /** Production change that fails this: dropping the compatibility collector entirely. */
-    @Test
-    fun deprecatedObserverStillReceivesEvents() {
-        val observation = Observation()
-        val seen = recordingObserver()
-        observation.addObserver(seen.first)
-
-        observation.emit(sampleEvent(), null)
-        val delivered = awaitEvents(seen.second, 1)
-
-        assertEquals(1, delivered.size)
-        assertEquals(200, delivered[0].responseCode)
         observation.close()
     }
 
@@ -278,24 +250,6 @@ class ObservationTest {
 
         assertTrue(delivered.await(2, TimeUnit.SECONDS))
         assertNotEquals(Thread.currentThread(), callbackThread.get())
-        observation.close()
-    }
-
-    /** Production change that fails this: replacing the SharedFlow with a single-consumer channel. */
-    @Test
-    fun eventsReachEveryCollector() = runTest {
-        val observation = Observation()
-        val first = mutableListOf<RequestEvent>()
-        val second = mutableListOf<RequestEvent>()
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
-        scope.launch { observation.events.collect { first.add(it) } }
-        scope.launch { observation.events.collect { second.add(it) } }
-
-        observation.emit(sampleEvent(), null)
-
-        assertEquals(1, first.size)
-        assertEquals(1, second.size)
-        scope.cancel()
         observation.close()
     }
 

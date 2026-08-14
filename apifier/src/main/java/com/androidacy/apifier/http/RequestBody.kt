@@ -25,7 +25,7 @@ import okio.source
  * The payload of a request.
  *
  * [writeTo] must be replayable: a retry or a redirect writes the same body again, so an
- * implementation reads its source from the start on every call rather than consuming it once.
+ * implementation reads its source from the start on every call and never consumes it once.
  */
 abstract class RequestBody {
 
@@ -39,7 +39,7 @@ abstract class RequestBody {
     /**
      * A fresh, pull-based view of this body's bytes, read incrementally by the upload provider
      * instead of all at once. Called again on every rewind, so an override that owns a resource
-     * (a file handle, a part's own source) must reopen it here rather than reuse a spent one.
+     * (a file handle, a part's own source) must reopen it here; a spent one cannot be reused.
      *
      * The default buffers the whole [writeTo] output once, the same memory shape a body without
      * a pull-friendly source had before this seam existed; bodies whose bytes are already

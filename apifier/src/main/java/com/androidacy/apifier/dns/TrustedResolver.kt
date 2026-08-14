@@ -32,9 +32,8 @@ class ResolverUnavailableException(message: String, cause: Throwable?) : IOExcep
 /**
  * One known-good public resolver, dialed by IP literal over RFC 8484 binary POST.
  *
- * The transport is deliberately [HttpsURLConnection] rather than the library's own call path:
- * the verdict this resolver feeds gates that path, and routing the check through it would let
- * the gate wait on itself.
+ * The transport is deliberately [HttpsURLConnection]. The verdict this resolver feeds gates the
+ * library's own call path, so routing the check through it would let the gate wait on itself.
  */
 internal open class TrustedResolver(
     val name: String,

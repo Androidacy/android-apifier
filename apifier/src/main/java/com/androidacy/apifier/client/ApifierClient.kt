@@ -213,11 +213,7 @@ class ApifierClient internal constructor(
 
     private val inCallback: ThreadLocal<Boolean> = ThreadLocal.withInitial { false }
 
-    /**
-     * Provider selection outcome in ladder order. Keys are `name:version`, values are the
-     * `HttpClientBuilder.PROVIDER_*` statuses.
-     */
-    val providerReport: Map<String, String> get() = engine.providerReport
+    internal val providerReport: Map<String, String> get() = engine.providerReport
 
     override suspend fun send(request: Request): Response = send(request, CallOptions())
 

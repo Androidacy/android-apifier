@@ -46,7 +46,7 @@ internal class PinnedRootTrust(roots: List<X509Certificate>) {
      * that simply failed, which the exception type alone cannot distinguish. A handshake that
      * succeeds leaves it false, so a socket failure later in the same query stays a connection
      * failure. Queries run concurrently on a shared executor and each connection holds one
-     * thread for its lifetime, so the flag is per thread rather than per instance.
+     * thread for its lifetime, which is why the flag is per thread.
      */
     val certificateRejected: ThreadLocal<Boolean> = ThreadLocal.withInitial { false }
 

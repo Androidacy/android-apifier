@@ -64,7 +64,7 @@ internal interface CallOutcome {
  *
  * The callback delivery and the body stream are separate: [CallOutcome] fires as soon as the
  * headers arrive, and the body flows through a [BodyPipe] afterwards, so a failure partway
- * through the body reaches the reader rather than the callback.
+ * through the body reaches the reader; the callback has already fired by then.
  *
  * [deliveryExecutor] must not be the thread that drives the engine callbacks. The base callback
  * arms the next read only after `onResponseStarted` returns, so a consumer that drains the body

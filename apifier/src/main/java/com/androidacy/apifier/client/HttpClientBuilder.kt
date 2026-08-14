@@ -36,11 +36,11 @@ class HttpClientBuilder(
     companion object {
         private const val TAG = "HttpClientBuilder"
 
-        const val PROVIDER_IN_USE = "IN_USE"
-        const val PROVIDER_TOO_OLD = "TOO_OLD"
-        const val PROVIDER_INELIGIBLE_PLAT = "INELIGIBLE_PLAT"
-        const val PROVIDER_FAILED = "FAILED"
-        const val PROVIDER_NOT_PRESENT = "NOT_PRESENT"
+        internal const val PROVIDER_IN_USE = "IN_USE"
+        internal const val PROVIDER_TOO_OLD = "TOO_OLD"
+        internal const val PROVIDER_INELIGIBLE_PLAT = "INELIGIBLE_PLAT"
+        internal const val PROVIDER_FAILED = "FAILED"
+        internal const val PROVIDER_NOT_PRESENT = "NOT_PRESENT"
 
         private const val GMS_PROVIDER_NAME = "Google-Play-Services-Cronet-Provider"
         private const val JAVA_PROVIDER_CLASS = "org.chromium.net.impl.JavaCronetProvider"
@@ -64,7 +64,7 @@ class HttpClientBuilder(
      * Provider selection outcome in ladder order. Keys are `name:version`, or the bare name
      * when the version could not be read. Empty until [build] runs.
      */
-    var providerReport: Map<String, String> = emptyMap()
+    internal var providerReport: Map<String, String> = emptyMap()
         private set
 
     fun build(): CronetEngine {
@@ -139,6 +139,7 @@ class HttpClientBuilder(
         val report = LinkedHashMap<String, String>()
         val provider = selectProvider(report)
         providerReport = report
+        Log.i(TAG, "Cronet providers: " + report.entries.joinToString { "${it.key}=${it.value}" })
 
         val builder = provider.createBuilder().apply {
             enableBrotli(config.cronetConfig.enableBrotli)

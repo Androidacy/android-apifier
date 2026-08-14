@@ -143,7 +143,7 @@ class BodyPipeTest {
         }
         val elapsedMs = (System.nanoTime() - started) / 1_000_000
 
-        assertNotNull("expected a read after close to throw rather than hang", thrown)
+        assertNotNull("a read after close must throw", thrown)
         // Fast, so a close that left the underlying source open and merely waited out the
         // read deadline would not pass.
         assertTrue("read returned after ${elapsedMs}ms", elapsedMs < 5_000)

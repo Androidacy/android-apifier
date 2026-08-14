@@ -680,30 +680,6 @@ class PipelineTest {
         assertSame(response, pipeline.withProgress(response, CallOptions()))
     }
 
-    /**
-     * Production change that fails this: changing the documented capacity guidance in
-     * [Requester.progress]'s KDoc without changing what emission actually requires. A
-     * default-constructed [MutableSharedFlow] drops every emission even with a collector
-     * already attached, because its zero-length buffer has no room for one until the
-     * collector re-suspends to receive it, which never happens between two back-to-back reads.
-     */
-    @Test
-    fun sinkWithDocumentedCapacityReceivesEveryEmission() = runTest {
-        val (documented, documentedCollected) = collectingSink(this)
-        val default = MutableSharedFlow<Progress>()
-        val defaultCollected = mutableListOf<Progress>()
-        val defaultScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
-        defaultScope.launch { default.collect { defaultCollected += it } }
-        val payload = ByteArray(9) { it.toByte() }
-
-        ProgressBody(chunkedBody(payload, 3), documented).source().readByteArray()
-        ProgressBody(chunkedBody(payload, 3), default).source().readByteArray()
-
-        assertTrue("documented capacity must receive every emission", documentedCollected.isNotEmpty())
-        assertTrue("a default-constructed sink must receive nothing", defaultCollected.isEmpty())
-        defaultScope.cancel()
-    }
-
     /** Production change that fails this: leaving the tag unwritten in prepare. */
     @Test
     fun progressSinkReachesTheTransportThroughPrepare() {

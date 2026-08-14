@@ -36,7 +36,7 @@ import javax.net.ssl.SSLContext
  * Drives the real [TrustedResolver] against local TLS servers built from the committed
  * keystores. Fakes cannot cover this: every other test in the package supplies the exception
  * it wants, so only a real handshake proves a rejected certificate is reported as rejection
- * rather than as unavailability.
+ * and not as unavailability.
  */
 class TrustedResolverTest {
 
