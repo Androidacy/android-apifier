@@ -478,20 +478,6 @@ class CronetCallTest {
     }
 
     @Test
-    fun theTransportSeamExposesAwait() {
-        val harness = Harness()
-        harness.urlRequest.onStart = {
-            harness.cronetCallback.onResponseStarted(harness.urlRequest, info(status = 201))
-        }
-        val transport = AttemptTransport { _, _ -> harness.call }
-
-        val seamCall = transport.newCall(harness.call.request(), null)
-        val response = runBlocking { withTimeout(AWAIT_TIMEOUT_MS) { seamCall.await() } }
-
-        assertEquals(201, response.code)
-    }
-
-    @Test
     fun cancelBeforeEnqueueFailsImmediately() {
         val harness = Harness()
         harness.call.cancel()

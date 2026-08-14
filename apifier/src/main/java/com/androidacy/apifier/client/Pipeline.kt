@@ -618,11 +618,8 @@ private class BudgetedBody(
 }
 
 /**
- * Reports read progress as the consumer drains [body] into [progressSink].
- *
- * A body of unknown length ([ResponseBody.contentLength] of -1) still emits at EOF, but since
- * [Progress.contentLength] stays -1 that emission never equals a byte total: there is nothing
- * for it to reach, so no emission from such a body is ever distinguishable as terminal.
+ * Reports read progress as the consumer drains [body] into [progressSink]. See [Progress] for
+ * how an unknown [ResponseBody.contentLength] affects the emissions.
  */
 internal class ProgressBody(
     private val body: ResponseBody,

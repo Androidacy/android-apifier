@@ -8,9 +8,13 @@ HTTP and API networking library for Android, built directly on Cronet.
 
 ## Features
 
+- **Coroutine call surface**: `send()` and its shorthands (`get`, `post`, `delete`, `head`,
+  `download`, `upload`) are `suspend` functions on `Requester`; the callback-based `Call`/`Callback`
+  surface still works but is deprecated
 - **Cronet transport**: provider ladder (HttpEngine → GMS → app-packaged → fallback → reflective Java provider), QUIC/HTTP2/Brotli
 - **Typed errors**: failures surface as `ApifierException` subtypes instead of a generic `IOException`
-- **Request observation**: per-client and per-call observers see outcome, timing and byte counts for every attempt
+- **Request observation**: `ApifierClient.events` is a `SharedFlow<RequestEvent>` carrying outcome,
+  timing and byte counts for every attempt; a per-call `observe()` view sees only that call's event
 - **Protected-domain trust check**: compares a configured host's system DNS answer against known-good public resolvers before the call runs
 - **Encrypted cookies**: public-suffix-scoped cookie jar backed by a pluggable store, AES-GCM
   encrypted with an Android Keystore key (StrongBox or TEE where the device has one). A device
@@ -78,32 +82,34 @@ val client = ApifierClient(context) {
     dynamicHeader("Authorization") { getAuthToken() }
 }
 
-client.get("https://api.example.com/data", object : Callback {
-    override fun onResponse(call: Call, response: Response) {
-        // Handle response
+viewModelScope.launch {
+    val response = client.get("https://api.example.com/data")
+    response.use {
+        if (it.isSuccessful) render(it.body.string())
     }
+}
 
-    override fun onFailure(call: Call, e: IOException) {
-        // Handle error
-    }
-})
-
-// Release the engine, thread pools and network callback when the client is no longer needed.
+// In onCleared() or equivalent: release the engine, thread pools and network callback.
 client.close()
 ```
 
-Construction blocks: selecting a Cronet provider can reach Google Play services and wait on a
-Dynamite download, so build the client on a background thread.
+`send`, `get`, `post`, `delete`, `head`, `download` and `upload` are `suspend` functions on
+`Requester`; call them from a coroutine. Construction blocks too: selecting a Cronet provider can
+reach Google Play services and wait on a Dynamite download, so build the client on a background
+thread, or launch construction itself from a coroutine.
 
 ## Observation
 
-Observers see one event per attempt: outcome, error code, response code, elapsed and
-time-to-first-byte, bytes sent and received, host, method, attempt number, serving provider, and
-whether a retry follows. A client-wide observer sees every call; a per-call observer set through
-`observe` on a derived view sees exactly one event, the attempt that ended its call.
+`ApifierClient.events` is a `SharedFlow<RequestEvent>` with one event per attempt: outcome, error
+code, response code, elapsed and time-to-first-byte, bytes sent and received, host, method,
+attempt number, serving provider, and whether a retry follows. Collect it for every call the
+client makes, or attach a per-call observer through `observe()` on a derived view to see just the
+one event that ended that call.
 
 ```kotlin
-client.addObserver { event -> log("${event.method} ${event.host} -> ${event.outcome}") }
+scope.launch {
+    client.events.collect { event -> log("${event.method} ${event.host} -> ${event.outcome}") }
+}
 
 val response = client.maxAttempts(1).observe { report(it) }.get("https://api.example.com/data")
 ```
@@ -123,11 +129,10 @@ client.setEnforceProtectedDomains(false)
 
 ## Errors
 
-Every failure that reaches a callback or a blocking `execute()` is an `ApifierException`:
-`Transport` for a Cronet network failure, `CircuitOpen`, `Cancelled`, `CallTimeout`,
-`RedirectRefused`, `DnsUntrusted`, and `Unexpected` for anything the pipeline does not model,
-which carries the original throwable as its cause. Each one reports an `ErrorCode` and whether it
-is retryable.
+Every failure `send()` throws is an `ApifierException`: `Transport` for a Cronet network failure,
+`CircuitOpen`, `Cancelled`, `CallTimeout`, `RedirectRefused`, `DnsUntrusted`, and `Unexpected` for
+anything the pipeline does not model, which carries the original throwable as its cause. Each one
+reports an `ErrorCode` and whether it is retryable.
 
 ## Cookie Storage
 
@@ -165,8 +170,10 @@ scope.launch {
     }
 }
 
-client.download(url, progress, callback)
-client.upload(url, files, fileNames, progress, callback)
+scope.launch {
+    client.progress(progress).download(url).close()
+    client.progress(progress).upload(url, files, fileNames).close()
+}
 ```
 
 ## Security
@@ -192,12 +199,29 @@ backend is configured.
 
 ## Migrating to 3.0.0
 
-- Callbacks run on the client's worker pool, and the body handed to `onResponse` is still
-  streaming when the callback fires. Post to your own handler before touching the UI, read or
-  close the body, and do not treat the callback returning as the end of the call: the client stays
-  active until the body ends.
-- `ProgressListener` is gone. `download` and `upload` now take a `MutableSharedFlow<Progress>`,
-  built with `extraBufferCapacity > 0`; see [Progress Tracking](#progress-tracking).
+- `send()` (and `get`/`post`/`delete`/`head`/`download`/`upload`) is the call surface now: a
+  `suspend fun` on `Requester` that returns the `Response` directly, in place of `enqueue`/`execute`.
+- `Call`, `Call.enqueue`, `Call.execute`, `Call.cancel`, `Call.isCanceled` and `Call.Factory` are
+  deprecated; they still work but are removed in 4.0. `Callback` itself is not deprecated, since
+  `Call.enqueue` still needs somewhere to report to until it is gone.
+- If you keep using callbacks in the meantime: callbacks run on the client's worker pool, and the
+  body handed to `onResponse` is still streaming when the callback fires. Post to your own handler
+  before touching the UI, read or close the body, and do not treat the callback returning as the
+  end of the call: the client stays active until the body ends.
+- `ProgressListener` and `ProgressDirection` are gone. `progress(sink)` on `Requester` (or
+  `download`/`upload`'s `progress` parameter on the deprecated callback surface) takes a
+  `MutableSharedFlow<Progress>`, built with `extraBufferCapacity > 0`; see
+  [Progress Tracking](#progress-tracking). `Progress` carries no direction, since a call's upload
+  and download phases never interleave.
+- `addObserver`/`removeObserver` are deprecated in favour of `ApifierClient.events`, a
+  `SharedFlow<RequestEvent>`; see [Observation](#observation).
+- `ResponseBody.source()` and `byteStream()` are deprecated in favour of the suspend
+  `ResponseBody.bytes()`/`string()`, which read the whole body on `Dispatchers.IO` instead of
+  blocking the calling thread.
+- `NoRetry` and `Request.Builder.noRetry()` are gone; `maxAttempts(1)`, the default, replaces them.
+- `retry { maxAttempts }` and `timeouts { call }` are gone from the DSL; the top-level
+  `NetworkConfigBuilder.maxAttempts(count)`/`timeout(duration)` replace them, and are also the
+  per-call modifiers on `Requester`.
 - Failures arrive as `ApifierException` subtypes. Code matching on the old flat
   `IOException("Cronet request failed")` message needs to switch on `errorCode` instead.
 - `ApifierClient` is `Closeable` and owns an engine, thread pools and a network callback. Call

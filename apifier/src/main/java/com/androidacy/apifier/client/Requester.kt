@@ -83,6 +83,9 @@ interface Requester {
     /**
      * POSTs [files] to [url] as multipart form data. [fileNames] are the form-data field names,
      * matching [files] by index. See [send].
+     *
+     * @throws IllegalArgumentException [files] is empty, [files] and [fileNames] differ in size,
+     *   or one of [files] does not exist.
      */
     suspend fun upload(url: String, files: List<File>, fileNames: List<String>): Response {
         require(files.isNotEmpty()) { "Files list cannot be empty" }
@@ -114,9 +117,8 @@ interface Requester {
     fun timeout(value: Long, unit: TimeUnit): Requester = timeout(unit.toMillis(value).milliseconds)
 
     /**
-     * A view whose calls report their byte counts into [sink]. An upload and a download never
-     * interleave in it: Cronet fully drains the request body before the response arrives, so a
-     * call that both sends and reads a body reports one phase, then the other.
+     * A view whose calls report their byte counts into [sink]. See [Progress] for what each
+     * emission means.
      *
      * Build [sink] with `extraBufferCapacity > 0`. A default `MutableSharedFlow<Progress>()` has
      * no buffer space and `tryEmit` returns false for it every time, so passing one silently

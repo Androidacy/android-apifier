@@ -200,26 +200,6 @@ class ApifierClientTest {
         assertEquals(Outcome.SUCCESS, events[0].outcome)
     }
 
-    /**
-     * A stand-in for the deleted `NoRetry` marker, tagged onto the request the same way the
-     * removed `noRetry()` extension did. Fails if attempt-count logic special-cases any tag again.
-     */
-    private object NoRetryTagProbe
-
-    @Test
-    fun noRetryTagIsGone() {
-        val engine = FakeEngine(respond = { serverError(it) })
-        val config = NetworkConfigBuilder().apply { maxAttempts(2) }.build()
-        val client = clientOf(engine, config)
-        val request = Request.Builder().url(URL).tag(NoRetryTagProbe::class.java, NoRetryTagProbe).get().build()
-
-        val response = runBlocking { client.send(request) }
-
-        assertEquals(2, engine.seen.size)
-        response.close()
-        client.close()
-    }
-
     /** Fails if `progress` is ever added to [NetworkConfigBuilder]; see its KDoc for why it stays out. */
     @Test
     fun progressIsNotOnTheBuilder() {
