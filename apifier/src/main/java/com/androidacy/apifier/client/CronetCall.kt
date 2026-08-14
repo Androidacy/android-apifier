@@ -17,8 +17,6 @@ package com.androidacy.apifier.client
 
 import android.net.Uri
 import com.androidacy.apifier.http.ApifierException
-import com.androidacy.apifier.http.Call
-import com.androidacy.apifier.http.Callback
 import com.androidacy.apifier.http.Headers
 import com.androidacy.apifier.http.MediaType.Companion.toMediaTypeOrNull
 import com.androidacy.apifier.http.Request
@@ -53,9 +51,18 @@ internal fun interface UrlRequestFactory {
 }
 
 /**
+ * Terminal outcome of a [CronetCall]. Internal-only, so unlike the public `Callback` it carries
+ * no `Call` reference for a caller to read back.
+ */
+internal interface CallOutcome {
+    fun onSuccess(response: Response)
+    fun onFailure(e: IOException)
+}
+
+/**
  * One attempt at [request], run on a Cronet engine.
  *
- * The callback delivery and the body stream are separate: [Callback] fires as soon as the
+ * The callback delivery and the body stream are separate: [CallOutcome] fires as soon as the
  * headers arrive, and the body flows through a [BodyPipe] afterwards, so a failure partway
  * through the body reaches the reader rather than the callback.
  *
@@ -86,7 +93,7 @@ internal class CronetCall(
     private val bodyPipe = BodyPipe(readTimeoutMs) { urlRequest.get()?.cancel() }
 
     @Volatile
-    private var callback: Callback? = null
+    private var outcome: CallOutcome? = null
 
     @Volatile
     private var startNanos = 0L
@@ -106,24 +113,9 @@ internal class CronetCall(
 
     fun request(): Request = request
 
-    /**
-     * [Callback.onResponse] and [Callback.onFailure] still take a [Call], a constraint of the
-     * public interface this class no longer implements. Neither this class's own callers nor the
-     * pipeline's ever read that argument, so an inert stand-in satisfies the signature without
-     * extending the deleted conformance back onto [CronetCall] itself.
-     */
-    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
-    private val callHandle: Call = object : Call {
-        override fun request(): Request = this@CronetCall.request()
-        override fun enqueue(callback: Callback) = throw UnsupportedOperationException()
-        override fun execute(): Response = throw UnsupportedOperationException()
-        override fun cancel() = throw UnsupportedOperationException()
-        override fun isCanceled(): Boolean = throw UnsupportedOperationException()
-    }
-
-    fun enqueue(callback: Callback) {
+    fun enqueue(outcome: CallOutcome) {
         check(enqueued.compareAndSet(false, true)) { "Call already enqueued" }
-        this.callback = callback
+        this.outcome = outcome
 
         if (canceled.get()) {
             deliverFailure(ApifierException.Cancelled())
@@ -141,17 +133,16 @@ internal class CronetCall(
         if (canceled.get()) started.cancel()
     }
 
-    @Suppress("DEPRECATION")
     override suspend fun await(): Response = suspendCancellableCoroutine { continuation ->
         continuation.invokeOnCancellation { cancel() }
-        enqueue(object : Callback {
-            override fun onResponse(call: Call, response: Response) {
+        enqueue(object : CallOutcome {
+            override fun onSuccess(response: Response) {
                 // A cancel that lands between the delivery and the resume leaves the caller with
                 // no reference to close, and the body holds the connection open.
                 continuation.resume(response) { _, undelivered, _ -> undelivered.close() }
             }
 
-            override fun onFailure(call: Call, e: IOException) {
+            override fun onFailure(e: IOException) {
                 continuation.resumeWithException(e)
             }
         })
@@ -168,16 +159,16 @@ internal class CronetCall(
     fun isCanceled(): Boolean = canceled.get()
 
     private fun deliverResponse(response: Response) {
-        val target = callback ?: return
+        val target = outcome ?: return
         if (delivered.compareAndSet(false, true)) {
-            deliver { target.onResponse(callHandle, response) }
+            deliver { target.onSuccess(response) }
         }
     }
 
     private fun deliverFailure(e: IOException) {
-        val target = callback ?: return
+        val target = outcome ?: return
         if (delivered.compareAndSet(false, true)) {
-            deliver { target.onFailure(callHandle, e) }
+            deliver { target.onFailure(e) }
         }
     }
 

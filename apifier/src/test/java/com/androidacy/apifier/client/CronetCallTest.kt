@@ -17,7 +17,6 @@ package com.androidacy.apifier.client
 
 import android.net.Uri
 import com.androidacy.apifier.http.ApifierException
-import com.androidacy.apifier.http.Callback
 import com.androidacy.apifier.http.ErrorCode
 import com.androidacy.apifier.http.Headers
 import com.androidacy.apifier.http.Request
@@ -47,10 +46,8 @@ import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.AbstractMap
-import com.androidacy.apifier.http.Call as ApifierCall
 
 @RunWith(RobolectricTestRunner::class)
-@Suppress("DEPRECATION")
 class CronetCallTest {
 
     @Test
@@ -536,15 +533,15 @@ class CronetCallTest {
         override fun immediatelyRetryable(): Boolean = false
     }
 
-    private class RecordingCallback : Callback {
+    private class RecordingCallback : CallOutcome {
         val responses = mutableListOf<Response>()
         val failures = mutableListOf<IOException>()
 
-        override fun onResponse(call: ApifierCall, response: Response) {
+        override fun onSuccess(response: Response) {
             responses += response
         }
 
-        override fun onFailure(call: ApifierCall, e: IOException) {
+        override fun onFailure(e: IOException) {
             failures += e
         }
     }

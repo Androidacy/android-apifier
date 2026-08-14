@@ -18,8 +18,6 @@ package com.androidacy.apifier.client
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.androidacy.apifier.http.ApifierException
-import com.androidacy.apifier.http.Call
-import com.androidacy.apifier.http.Callback
 import com.androidacy.apifier.http.Request
 import com.androidacy.apifier.http.Response
 import org.chromium.net.CronetProvider
@@ -65,16 +63,16 @@ class CronetTransportFallbackTest {
             val request = Request.Builder().url("https://127.0.0.1:$closedPort/").get().build()
 
             val failure = AtomicReference<IOException?>()
-            val response = AtomicReference<Response?>()
+            val responseRef = AtomicReference<Response?>()
             val done = CountDownLatch(1)
-            transport.newCall(request, null).enqueue(object : Callback {
-                override fun onResponse(call: Call, response1: Response) {
-                    response1.close()
-                    response.set(response1)
+            transport.newCall(request, null).enqueue(object : CallOutcome {
+                override fun onSuccess(response: Response) {
+                    response.close()
+                    responseRef.set(response)
                     done.countDown()
                 }
 
-                override fun onFailure(call: Call, e: IOException) {
+                override fun onFailure(e: IOException) {
                     failure.set(e)
                     done.countDown()
                 }
@@ -84,7 +82,7 @@ class CronetTransportFallbackTest {
                 "no terminal callback within ${TERMINAL_WAIT_SECONDS}s",
                 done.await(TERMINAL_WAIT_SECONDS, TimeUnit.SECONDS)
             )
-            assertNull("expected no response from a closed port", response.get())
+            assertNull("expected no response from a closed port", responseRef.get())
             assertTrue(
                 "expected an ApifierException, got ${failure.get()}",
                 failure.get() is ApifierException.Transport
