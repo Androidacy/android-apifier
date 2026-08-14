@@ -113,7 +113,15 @@ interface Requester {
     /** [timeout] for callers without Kotlin durations. */
     fun timeout(value: Long, unit: TimeUnit): Requester = timeout(unit.toMillis(value).milliseconds)
 
-    /** A view whose calls report their byte counts into [sink]. See [CallOptions.progress]. */
+    /**
+     * A view whose calls report their byte counts into [sink]. An upload and a download never
+     * interleave in it: Cronet fully drains the request body before the response arrives, so a
+     * call that both sends and reads a body reports one phase, then the other.
+     *
+     * Build [sink] with `extraBufferCapacity > 0`. A default `MutableSharedFlow<Progress>()` has
+     * no buffer space and `tryEmit` returns false for it every time, so passing one silently
+     * receives nothing.
+     */
     fun progress(sink: MutableSharedFlow<Progress>): Requester
 
     /** A view whose calls report their one terminal event to [observer]. */

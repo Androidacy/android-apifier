@@ -67,15 +67,7 @@ internal data class CallOptions(
     // call's own terminal event out of.
     @Suppress("DEPRECATION")
     val observer: RequestObserver? = null,
-    /**
-     * Sink for this call's byte counts. A request that both sends a body and reads one reports
-     * both phases into the same sink, one at a time: Cronet fully drains the request body before
-     * the response arrives, so an upload count and a download count never interleave.
-     *
-     * Must be built with `extraBufferCapacity > 0`. A default `MutableSharedFlow<Progress>()` has
-     * no buffer space and `tryEmit` returns false for it every time, so a caller who passes one
-     * silently receives nothing.
-     */
+    /** Sink for this call's byte counts; see [Requester.progress] for its contract. */
     val progress: MutableSharedFlow<Progress>? = null
 )
 

@@ -284,7 +284,7 @@ class ApifierClient internal constructor(
     fun head(url: String, callback: Callback): Call =
         enqueue(Request.Builder().url(url).head().build(), callback)
 
-    /** GET with progress tracking. Build [progress] with `extraBufferCapacity > 0`; see [CallOptions.progress]. */
+    /** GET with progress tracking; see [Requester.progress] for how [progress] must be built. */
     fun download(url: String, progress: MutableSharedFlow<Progress>, callback: Callback): Call {
         val request = Request.Builder().url(url).get().build()
         return enqueue(request, callback, CallOptions(progress = progress))

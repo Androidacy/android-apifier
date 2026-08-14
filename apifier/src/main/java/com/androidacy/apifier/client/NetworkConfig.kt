@@ -39,7 +39,7 @@ data class NetworkConfig(
     val enforceProtectedDomains: Boolean = true,
     /** Registers an internal `Log.d`-per-event observer. Advisory only; release logcat is stripped. */
     val logRequests: Boolean = false,
-    /** Falls back to [com.androidacy.apifier.client.Requester.observe]'s per-call observer when a call sets none. */
+    /** Observer used for a call whose [com.androidacy.apifier.client.Requester.observe] set none. */
     @Suppress("DEPRECATION")
     val defaultObserver: RequestObserver? = null
 )
@@ -151,11 +151,11 @@ class NetworkConfigBuilder {
     }
 
     fun timeouts(block: TimeoutConfigBuilder.() -> Unit) {
-        timeouts = TimeoutConfigBuilder().apply(block).build()
+        timeouts = TimeoutConfigBuilder().apply(block).build(timeouts.call)
     }
 
     fun retry(block: RetryConfigBuilder.() -> Unit) {
-        retryConfig = RetryConfigBuilder().apply(block).build()
+        retryConfig = RetryConfigBuilder().apply(block).build(retryConfig.maxAttempts)
     }
 
     fun circuitBreaker(block: CircuitBreakerConfigBuilder.() -> Unit) {
@@ -202,21 +202,22 @@ class CronetConfigBuilder {
     )
 }
 
-/** DSL builder for [TimeoutConfig]. */
+/** DSL builder for [TimeoutConfig]. No `call` setter here; see [NetworkConfigBuilder.timeout]. */
 class TimeoutConfigBuilder {
     var read: Duration = 60.seconds
-    var call: Duration = 90.seconds
 
-    fun build() = TimeoutConfig(read, call)
+    /** [carriedCall] lets [NetworkConfigBuilder.timeouts] preserve a call budget set through [NetworkConfigBuilder.timeout]. */
+    fun build(carriedCall: Duration = TimeoutConfig().call) = TimeoutConfig(read, carriedCall)
 }
 
-/** DSL builder for [RetryConfig]. */
+/** DSL builder for [RetryConfig]. No `maxAttempts` setter here; see [NetworkConfigBuilder.maxAttempts]. */
 class RetryConfigBuilder {
-    var maxAttempts: Int = 1
     var retryOn5xx: Boolean = true
     var retryIdempotentOnly: Boolean = true
 
-    fun build() = RetryConfig(maxAttempts, retryOn5xx, retryIdempotentOnly)
+    /** [carriedMaxAttempts] lets [NetworkConfigBuilder.retry] preserve a ceiling set through [NetworkConfigBuilder.maxAttempts]. */
+    fun build(carriedMaxAttempts: Int = RetryConfig().maxAttempts) =
+        RetryConfig(carriedMaxAttempts, retryOn5xx, retryIdempotentOnly)
 }
 
 /** DSL builder for [CircuitBreakerConfig]. */

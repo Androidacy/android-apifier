@@ -634,7 +634,7 @@ class PipelineTest {
 
     /**
      * Production change that fails this: changing the documented capacity guidance in
-     * [CallOptions.progress]'s KDoc without changing what emission actually requires. A
+     * [Requester.progress]'s KDoc without changing what emission actually requires. A
      * default-constructed [MutableSharedFlow] drops every emission even with a collector
      * already attached, because its zero-length buffer has no room for one until the
      * collector re-suspends to receive it, which never happens between two back-to-back reads.
@@ -699,7 +699,7 @@ class PipelineTest {
     }
 
     /**
-     * Registers a live collector before returning, matching the shape [CallOptions.progress]'s
+     * Registers a live collector before returning, matching the shape [Requester.progress]'s
      * KDoc documents: a sink with room in its buffer, subscribed ahead of any emission.
      */
     private fun collectingSink(scope: kotlinx.coroutines.test.TestScope): Pair<MutableSharedFlow<Progress>, List<Progress>> {

@@ -150,6 +150,56 @@ class ApifierClientTest {
         client.close()
     }
 
+    /** Fails if `retry { }` resets a ceiling set through the top-level [NetworkConfigBuilder.maxAttempts]. */
+    @Test
+    fun nestedRetryBlockDoesNotResetTheTopLevelMaxAttempts() {
+        val engine = FakeEngine(respond = { serverError(it) })
+        val config = NetworkConfigBuilder().apply {
+            maxAttempts(2)
+            retry { retryOn5xx = true }
+        }.build()
+        val client = clientOf(engine, config)
+
+        val response = runBlocking { client.get(URL) }
+
+        assertEquals(2, engine.seen.size)
+        response.close()
+        client.close()
+    }
+
+    /** Fails if `timeouts { }` resets a budget set through the top-level [NetworkConfigBuilder.timeout]. */
+    @Test
+    fun nestedTimeoutsBlockDoesNotResetTheTopLevelTimeout() {
+        val engine = FakeEngine(hang = true)
+        val config = NetworkConfigBuilder().apply {
+            timeout(200.milliseconds)
+            timeouts { read = 5.seconds }
+        }.build()
+        val client = clientOf(engine, config)
+
+        val thrown = assertThrows(ApifierException.CallTimeout::class.java) {
+            runBlocking { client.get(URL) }
+        }
+
+        assertEquals("the nested block reset the top-level timeout", 200L, thrown.timeoutMillis)
+        client.close()
+    }
+
+    /** Fails if the [NetworkConfigBuilder.observe] default is dropped anywhere between the builder and the terminal event. */
+    @Test
+    fun builderObserveReceivesTheTerminalEventWhenNoCallSetsOne() {
+        val engine = FakeEngine()
+        val events = Collections.synchronizedList(mutableListOf<RequestEvent>())
+        val config = NetworkConfigBuilder().apply { observe { events.add(it) } }.build()
+        val client = clientOf(engine, config)
+
+        runBlocking { client.get(URL).close() }
+        client.close()
+
+        assertEquals(1, events.size)
+        assertEquals(Outcome.SUCCESS, events[0].outcome)
+    }
+
     /**
      * A stand-in for the deleted `NoRetry` marker, tagged onto the request the same way the
      * removed `noRetry()` extension did. Fails if attempt-count logic special-cases any tag again.
