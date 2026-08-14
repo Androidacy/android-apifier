@@ -19,6 +19,8 @@ import com.androidacy.apifier.http.MediaType
 import com.androidacy.apifier.http.MultipartBody
 import com.androidacy.apifier.http.RequestBody
 import com.androidacy.apifier.http.RequestBody.Companion.asRequestBody
+import com.androidacy.apifier.progress.ProgressDirection
+import com.androidacy.apifier.progress.ProgressListener
 import java.io.File
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -146,17 +148,42 @@ class StreamingUploadProviderTest {
     @Test
     fun progressResetsOnRewind() {
         val body = InstrumentedBody(50L, CountingSource(50L))
-        val progress = mutableListOf<Pair<Long, Long>>()
-        val provider = StreamingUploadProvider(body) { sent, total -> progress.add(sent to total) }
+        val progress = RecordingProgress()
+        val provider = StreamingUploadProvider(body, progress)
         val sink = RecordingSink()
 
         provider.read(sink, ByteBuffer.allocate(16))
         provider.read(sink, ByteBuffer.allocate(16))
-        assertTrue(progress.last().first > 0)
+        assertTrue(progress.updates.last().bytes > 0)
 
         provider.rewind(sink)
 
-        assertEquals(0L to 50L, progress.last())
+        assertEquals(0L to 50L, progress.updates.last().let { it.bytes to it.contentLength })
+    }
+
+    @Test
+    fun uploadProgressIsMarkedUploadAndEndsOnce() {
+        val body = InstrumentedBody(48L, CountingSource(48L))
+        val progress = RecordingProgress()
+        val provider = StreamingUploadProvider(body, progress)
+        val sink = RecordingSink()
+
+        repeat(3) { provider.read(sink, ByteBuffer.allocate(16)) }
+
+        assertTrue(progress.updates.all { it.direction == ProgressDirection.UPLOAD })
+        assertEquals(listOf(48L), progress.updates.filter { it.done }.map { it.bytes })
+    }
+
+    @Test
+    fun bytesSentReportedSeparatelyFromTheListener() {
+        val body = InstrumentedBody(32L, CountingSource(32L))
+        val sent = mutableListOf<Long>()
+        val provider = StreamingUploadProvider(body, null) { sent += it }
+        val sink = RecordingSink()
+
+        repeat(2) { provider.read(sink, ByteBuffer.allocate(16)) }
+
+        assertEquals(listOf(16L, 32L), sent)
     }
 
     @Test
@@ -227,6 +254,26 @@ class StreamingUploadProviderTest {
             it.writeText(content)
             tempFiles += it
         }
+
+    private class ProgressUpdate(
+        val bytes: Long,
+        val contentLength: Long,
+        val done: Boolean,
+        val direction: ProgressDirection
+    )
+
+    private class RecordingProgress : ProgressListener {
+        val updates = mutableListOf<ProgressUpdate>()
+
+        override fun update(
+            bytesTransferred: Long,
+            contentLength: Long,
+            done: Boolean,
+            direction: ProgressDirection
+        ) {
+            updates += ProgressUpdate(bytesTransferred, contentLength, done, direction)
+        }
+    }
 
     private class RecordingSink : UploadDataSink() {
         val readSucceededCalls = mutableListOf<Boolean>()

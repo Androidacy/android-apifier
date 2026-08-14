@@ -36,6 +36,7 @@ import com.androidacy.apifier.observe.RequestObserver
 import com.androidacy.apifier.patterns.BackoffConfig
 import com.androidacy.apifier.patterns.CircuitBreaker
 import com.androidacy.apifier.patterns.ExponentialBackoff
+import com.androidacy.apifier.progress.ProgressDirection
 import com.androidacy.apifier.progress.ProgressListener
 import com.androidacy.apifier.security.PublicSuffixList
 import okio.Buffer
@@ -632,14 +633,19 @@ private class ProgressBody(
                 // EOF often lands on a byte total the previous read already reported, so the
                 // dedup guard below would swallow the done signal.
                 if (!doneReported.getAndSet(true)) {
-                    listener.update(totalRead.get(), body.contentLength(), true)
+                    listener.update(
+                        totalRead.get(),
+                        body.contentLength(),
+                        true,
+                        ProgressDirection.DOWNLOAD
+                    )
                 }
                 return bytesRead
             }
             val current = totalRead.addAndGet(bytesRead)
             val last = lastReported.get()
             if (current != last && lastReported.compareAndSet(last, current)) {
-                listener.update(current, body.contentLength(), false)
+                listener.update(current, body.contentLength(), false, ProgressDirection.DOWNLOAD)
             }
             return bytesRead
         }

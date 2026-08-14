@@ -16,6 +16,8 @@
 package com.androidacy.apifier.client
 
 import com.androidacy.apifier.http.RequestBody
+import com.androidacy.apifier.progress.ProgressDirection
+import com.androidacy.apifier.progress.ProgressListener
 import java.io.IOException
 import java.nio.ByteBuffer
 import okio.Buffer
@@ -34,7 +36,8 @@ import org.chromium.net.UploadDataSink
  */
 internal class StreamingUploadProvider(
     private val body: RequestBody,
-    private val onProgress: ((sent: Long, total: Long) -> Unit)?
+    private val listener: ProgressListener?,
+    private val onBytesSent: (Long) -> Unit = {}
 ) : UploadDataProvider() {
 
     private val total = body.contentLength()
@@ -60,7 +63,7 @@ internal class StreamingUploadProvider(
             transfer.read(byteBuffer)
             sent += read
         }
-        onProgress?.invoke(sent, total)
+        report()
         uploadDataSink.onReadSucceeded(total < 0 && exhausted)
     }
 
@@ -73,11 +76,16 @@ internal class StreamingUploadProvider(
         source = body.pullSource()
         transfer.clear()
         sent = 0L
-        onProgress?.invoke(0L, total)
+        report()
         uploadDataSink.onRewindSucceeded()
     }
 
     override fun close() {
         source.close()
+    }
+
+    private fun report() {
+        onBytesSent(sent)
+        listener?.update(sent, total, total in 0..sent, ProgressDirection.UPLOAD)
     }
 }

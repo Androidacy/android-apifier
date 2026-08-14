@@ -106,13 +106,28 @@ class MyCookieStorage : CookieStorage {
 
 ## Progress Tracking
 
+A request that sends a body and reads one reports both halves to the same listener, so every
+update carries the direction it belongs to and each direction reaches `done` once.
+
 ```kotlin
-client.download(url, object : ProgressListener {
-    override fun update(bytesRead: Long, contentLength: Long, done: Boolean) {
-        val progress = (bytesRead * 100 / contentLength).toInt()
-        updateProgressBar(progress)
+val listener = object : ProgressListener {
+    override fun update(
+        bytesTransferred: Long,
+        contentLength: Long,
+        done: Boolean,
+        direction: ProgressDirection
+    ) {
+        if (contentLength <= 0) return
+        val percent = (bytesTransferred * 100 / contentLength).toInt()
+        when (direction) {
+            ProgressDirection.UPLOAD -> updateUploadBar(percent)
+            ProgressDirection.DOWNLOAD -> updateDownloadBar(percent)
+        }
     }
-}, callback)
+}
+
+client.download(url, listener, callback)
+client.upload(url, files, fileNames, listener, callback)
 ```
 
 ## Security

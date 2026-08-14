@@ -28,6 +28,7 @@ import com.androidacy.apifier.http.ResponseBody.Companion.toResponseBody
 import com.androidacy.apifier.observe.Outcome
 import com.androidacy.apifier.observe.RequestEvent
 import com.androidacy.apifier.observe.RequestObserver
+import com.androidacy.apifier.progress.ProgressDirection
 import com.androidacy.apifier.progress.ProgressListener
 import org.chromium.net.CronetProvider
 import org.junit.Assert.assertEquals
@@ -63,7 +64,12 @@ class ApifierClientTest {
         val client = clientOf(engine)
         val file = temporaryFolder.newFile("payload.bin").apply { writeBytes(ByteArray(4)) }
         val progress = object : ProgressListener {
-            override fun update(bytesRead: Long, contentLength: Long, done: Boolean) = Unit
+            override fun update(
+                bytesTransferred: Long,
+                contentLength: Long,
+                done: Boolean,
+                direction: ProgressDirection
+            ) = Unit
         }
         val done = CountDownLatch(6)
         val callback = countingCallback(done)

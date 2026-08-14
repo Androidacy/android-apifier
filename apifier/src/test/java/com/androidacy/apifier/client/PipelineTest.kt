@@ -36,6 +36,7 @@ import com.androidacy.apifier.http.ResponseBody
 import com.androidacy.apifier.http.ResponseBody.Companion.asResponseBody
 import com.androidacy.apifier.http.ResponseBody.Companion.toResponseBody
 import com.androidacy.apifier.observe.Observation
+import com.androidacy.apifier.progress.ProgressDirection
 import com.androidacy.apifier.progress.ProgressListener
 import com.androidacy.apifier.security.PublicSuffixList
 import okio.Buffer
@@ -419,9 +420,16 @@ class PipelineTest {
         val transport = FakeTransport(listOf(step { ok(it, body = chunkedBody(payload, 4)) }))
         val pipeline = pipelineOf(transport, config())
         val updates = mutableListOf<Triple<Long, Long, Boolean>>()
+        val directions = mutableSetOf<ProgressDirection>()
         val listener = object : ProgressListener {
-            override fun update(bytesRead: Long, contentLength: Long, done: Boolean) {
-                updates.add(Triple(bytesRead, contentLength, done))
+            override fun update(
+                bytesTransferred: Long,
+                contentLength: Long,
+                done: Boolean,
+                direction: ProgressDirection
+            ) {
+                updates.add(Triple(bytesTransferred, contentLength, done))
+                directions.add(direction)
             }
         }
         val request = request().tag(ProgressListener::class.java, listener).build()
@@ -433,6 +441,7 @@ class PipelineTest {
         assertEquals(listOf(4L, 8L, 12L), progress)
         assertEquals(progress.distinct(), progress)
         assertEquals(listOf(Triple(12L, 12L, true)), updates.filter { it.third })
+        assertEquals(setOf(ProgressDirection.DOWNLOAD), directions)
     }
 
     private fun request(): Request.Builder = Request.Builder().url("https://$HOST/resource")

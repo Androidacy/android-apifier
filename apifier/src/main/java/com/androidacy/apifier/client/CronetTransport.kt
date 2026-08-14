@@ -71,11 +71,9 @@ class CronetTransport(
             if (!hasContentType) {
                 body.contentType()?.let { addHeader("Content-Type", it.toString()) }
             }
-            val progressListener = request.tag(ProgressListener::class.java)
             setUploadDataProvider(
-                StreamingUploadProvider(body) { sent, total ->
-                    bytesSent.set(sent)
-                    progressListener?.update(sent, total, total in 0..sent)
+                StreamingUploadProvider(body, request.tag(ProgressListener::class.java)) {
+                    bytesSent.set(it)
                 },
                 executor
             )

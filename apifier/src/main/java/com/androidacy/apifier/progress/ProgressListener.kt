@@ -15,12 +15,23 @@
  */
 package com.androidacy.apifier.progress
 
-/** Callback for tracking download/upload byte progress. */
+/** Which half of a call an update describes. */
+enum class ProgressDirection { UPLOAD, DOWNLOAD }
+
+/** Callback for tracking byte progress. */
 interface ProgressListener {
     /**
-     * @param bytesRead total bytes transferred so far
+     * A request that both sends a body and reads one reports both halves to the same listener, so
+     * each direction runs its own count and reaches [done] once.
+     *
+     * @param bytesTransferred total bytes moved so far in [direction]
      * @param contentLength total expected bytes, or -1 if unknown
-     * @param done true when the transfer is complete
+     * @param done true when that direction is complete
      */
-    fun update(bytesRead: Long, contentLength: Long, done: Boolean)
+    fun update(
+        bytesTransferred: Long,
+        contentLength: Long,
+        done: Boolean,
+        direction: ProgressDirection
+    )
 }
