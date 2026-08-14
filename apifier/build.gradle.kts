@@ -27,14 +27,14 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
 
     kotlin {
         jvmToolchain(21)
         compilerOptions {
-            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
         }
     }
 
@@ -80,7 +80,7 @@ dependencies {
     testImplementation("androidx.test:core:1.7.0")
 }
 
-val dokkaJavadocJar by tasks.registering(Jar::class) {
+val dokkaJavadocJar = tasks.register<Jar>("dokkaJavadocJar") {
     from(tasks.dokkaGeneratePublicationJavadoc.flatMap { it.outputDirectory })
     archiveClassifier.set("javadoc")
 }
