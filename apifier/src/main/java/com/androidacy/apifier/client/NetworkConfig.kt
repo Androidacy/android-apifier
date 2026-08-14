@@ -151,11 +151,11 @@ class NetworkConfigBuilder {
     }
 
     fun timeouts(block: TimeoutConfigBuilder.() -> Unit) {
-        timeouts = TimeoutConfigBuilder().apply(block).build(timeouts.call)
+        timeouts = TimeoutConfigBuilder().apply { carriedCall = timeouts.call }.apply(block).build()
     }
 
     fun retry(block: RetryConfigBuilder.() -> Unit) {
-        retryConfig = RetryConfigBuilder().apply(block).build(retryConfig.maxAttempts)
+        retryConfig = RetryConfigBuilder().apply { carriedMaxAttempts = retryConfig.maxAttempts }.apply(block).build()
     }
 
     fun circuitBreaker(block: CircuitBreakerConfigBuilder.() -> Unit) {
@@ -206,8 +206,10 @@ class CronetConfigBuilder {
 class TimeoutConfigBuilder {
     var read: Duration = 60.seconds
 
-    /** [carriedCall] lets [NetworkConfigBuilder.timeouts] preserve a call budget set through [NetworkConfigBuilder.timeout]. */
-    fun build(carriedCall: Duration = TimeoutConfig().call) = TimeoutConfig(read, carriedCall)
+    /** Set by [NetworkConfigBuilder.timeouts] before the block runs, to preserve a call budget set through [NetworkConfigBuilder.timeout]. */
+    internal var carriedCall: Duration = TimeoutConfig().call
+
+    fun build() = TimeoutConfig(read, carriedCall)
 }
 
 /** DSL builder for [RetryConfig]. No `maxAttempts` setter here; see [NetworkConfigBuilder.maxAttempts]. */
@@ -215,9 +217,10 @@ class RetryConfigBuilder {
     var retryOn5xx: Boolean = true
     var retryIdempotentOnly: Boolean = true
 
-    /** [carriedMaxAttempts] lets [NetworkConfigBuilder.retry] preserve a ceiling set through [NetworkConfigBuilder.maxAttempts]. */
-    fun build(carriedMaxAttempts: Int = RetryConfig().maxAttempts) =
-        RetryConfig(carriedMaxAttempts, retryOn5xx, retryIdempotentOnly)
+    /** Set by [NetworkConfigBuilder.retry] before the block runs, to preserve a ceiling set through [NetworkConfigBuilder.maxAttempts]. */
+    internal var carriedMaxAttempts: Int = RetryConfig().maxAttempts
+
+    fun build() = RetryConfig(carriedMaxAttempts, retryOn5xx, retryIdempotentOnly)
 }
 
 /** DSL builder for [CircuitBreakerConfig]. */
