@@ -26,6 +26,8 @@ import com.androidacy.apifier.http.Response
 import com.androidacy.apifier.http.ResponseBody.Companion.asResponseBody
 import com.androidacy.apifier.http.ResponseBody.Companion.toResponseBody
 import com.androidacy.apifier.http.toApifierException
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
 import okio.Buffer
 import okio.buffer
 import org.chromium.net.CronetException
@@ -34,12 +36,12 @@ import org.chromium.net.UrlResponseInfo
 import org.chromium.net.apihelpers.ImplicitFlowControlCallback
 import java.io.IOException
 import java.nio.ByteBuffer
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.resumeWithException
 
 /**
  * Builds the [UrlRequest] a call will run.
@@ -68,7 +70,7 @@ internal class CronetCall(
     private val listener: TransportListener?,
     private val deliveryExecutor: Executor,
     private val urlRequestFactory: UrlRequestFactory
-) : Call {
+) : AttemptCall {
 
     private companion object {
         const val MAX_REDIRECTS = 20
@@ -125,27 +127,23 @@ internal class CronetCall(
         if (canceled.get()) started.cancel()
     }
 
-    @Deprecated("Blocking bridge over the async path; prefer enqueue.")
-    override fun execute(): Response {
-        val done = CountDownLatch(1)
-        val result = AtomicReference<Response?>()
-        val failure = AtomicReference<IOException?>()
+    override suspend fun await(): Response = suspendCancellableCoroutine { continuation ->
+        continuation.invokeOnCancellation { cancel() }
         enqueue(object : Callback {
             override fun onResponse(call: Call, response: Response) {
-                result.set(response)
-                done.countDown()
+                // A cancel that lands between the delivery and the resume leaves the caller with
+                // no reference to close, and the body holds the connection open.
+                continuation.resume(response) { _, undelivered, _ -> undelivered.close() }
             }
 
             override fun onFailure(call: Call, e: IOException) {
-                failure.set(e)
-                done.countDown()
+                continuation.resumeWithException(e)
             }
         })
-
-        done.await()
-        failure.get()?.let { throw it }
-        return checkNotNull(result.get())
     }
+
+    @Deprecated("Blocking bridge over the async path; prefer enqueue.")
+    override fun execute(): Response = runBlocking { await() }
 
     override fun cancel() {
         if (!canceled.compareAndSet(false, true)) return

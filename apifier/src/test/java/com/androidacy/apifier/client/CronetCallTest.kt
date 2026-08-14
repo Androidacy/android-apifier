@@ -22,6 +22,13 @@ import com.androidacy.apifier.http.ErrorCode
 import com.androidacy.apifier.http.Headers
 import com.androidacy.apifier.http.Request
 import com.androidacy.apifier.http.Response
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.chromium.net.NetworkException
 import org.chromium.net.UrlRequest
 import org.chromium.net.UrlResponseInfo
@@ -365,6 +372,123 @@ class CronetCallTest {
     }
 
     @Test
+    fun awaitResumesOnceWithTheResponse() {
+        val harness = Harness()
+        harness.urlRequest.onStart = {
+            harness.cronetCallback.onResponseStarted(harness.urlRequest, info())
+            harness.readCompleted("ok")
+            harness.cronetCallback.onSucceeded(harness.urlRequest, info())
+        }
+
+        val response = runBlocking { withTimeout(AWAIT_TIMEOUT_MS) { harness.call.await() } }
+
+        assertEquals(200, response.code)
+        assertEquals("ok", response.body.string())
+        // A terminal path taken after the response was handed over must not resume again; a
+        // second resume throws out of here, on this thread.
+        harness.call.cancel()
+    }
+
+    @Test
+    fun awaitResumesOnceOnFailure() {
+        val harness = Harness()
+        harness.urlRequest.onStart = {
+            harness.cronetCallback.onFailed(
+                harness.urlRequest,
+                info(),
+                FakeNetworkException(NetworkException.ERROR_HOSTNAME_NOT_RESOLVED)
+            )
+        }
+
+        try {
+            runBlocking { withTimeout(AWAIT_TIMEOUT_MS) { harness.call.await() } }
+            fail("expected the transport failure to surface from await")
+        } catch (e: IOException) {
+            assertEquals(ErrorCode.HOSTNAME_NOT_RESOLVED, (e as ApifierException).errorCode)
+        }
+
+        harness.call.cancel()
+    }
+
+    @Test
+    fun cancellingTheCoroutineCancelsTheUrlRequest() {
+        val harness = Harness()
+
+        runBlocking {
+            val awaiting = launch(Dispatchers.Default) { harness.call.await() }
+            awaitUntil("the awaited call never started") { harness.urlRequest.started == 1 }
+            awaiting.cancelAndJoin()
+        }
+
+        awaitUntil("cancelling the coroutine never reached the UrlRequest") {
+            harness.urlRequest.canceled == 1
+        }
+        assertTrue(harness.call.isCanceled())
+    }
+
+    @Test
+    fun cancelAfterHeadersStillReachesTheStreamingBody() {
+        val harness = Harness()
+        harness.urlRequest.onStart = {
+            harness.cronetCallback.onResponseStarted(harness.urlRequest, info())
+        }
+
+        val response = runBlocking { withTimeout(AWAIT_TIMEOUT_MS) { harness.call.await() } }
+        harness.readCompleted("hi")
+        assertEquals("hi", response.body.source().readUtf8(2))
+        // Resuming the caller is not the end of the call: the body is still streaming.
+        assertEquals(0, harness.urlRequest.canceled)
+
+        harness.call.cancel()
+
+        assertEquals(1, harness.urlRequest.canceled)
+        // The fake request is inert, so the test plays the teardown callback a live engine sends
+        // back after a cancel.
+        harness.cronetCallback.onCanceled(harness.urlRequest, info())
+
+        try {
+            response.body.source().readUtf8()
+            fail("expected the cancellation to reach the body reader")
+        } catch (e: IOException) {
+            assertTrue("got $e", e is ApifierException.Cancelled)
+        }
+    }
+
+    @Test
+    fun awaitDoesNotBlockTheCallingThread() {
+        val harness = Harness()
+        val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+
+        try {
+            runBlocking {
+                val awaiting = launch(dispatcher) { harness.call.await() }
+                awaitUntil("the awaited call never started") { harness.urlRequest.started == 1 }
+
+                val other = async(dispatcher) { "ran" }
+
+                assertEquals("ran", withTimeout(AWAIT_TIMEOUT_MS) { other.await() })
+                awaiting.cancelAndJoin()
+            }
+        } finally {
+            dispatcher.close()
+        }
+    }
+
+    @Test
+    fun theTransportSeamExposesAwait() {
+        val harness = Harness()
+        harness.urlRequest.onStart = {
+            harness.cronetCallback.onResponseStarted(harness.urlRequest, info(status = 201))
+        }
+        val transport = AttemptTransport { _, _ -> harness.call }
+
+        val seamCall = transport.newCall(harness.call.request(), null)
+        val response = runBlocking { withTimeout(AWAIT_TIMEOUT_MS) { seamCall.await() } }
+
+        assertEquals(201, response.code)
+    }
+
+    @Test
     fun cancelBeforeEnqueueFailsImmediately() {
         val harness = Harness()
         harness.call.cancel()
@@ -492,7 +616,18 @@ class CronetCallTest {
         }
     }
 
+    private fun awaitUntil(message: String, condition: () -> Boolean) {
+        val deadline = System.nanoTime() + AWAIT_TIMEOUT_MS * 1_000_000
+        while (System.nanoTime() < deadline) {
+            if (condition()) return
+            Thread.sleep(10)
+        }
+        fail(message)
+    }
+
     private companion object {
+        const val AWAIT_TIMEOUT_MS = 5_000L
+
         fun info(
             status: Int = 200,
             url: String = "https://example.com/",

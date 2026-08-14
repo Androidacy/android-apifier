@@ -79,9 +79,24 @@ data class CallOptions(
 /** Carries a call's progress sink to the transport through [Request]'s tag mechanism. */
 internal class ProgressSink(val flow: MutableSharedFlow<Progress>)
 
+/**
+ * One attempt the pipeline drives.
+ *
+ * Separate from [Call], which is public surface: something a caller hands in as a [Call] does not
+ * offer this contract.
+ */
+internal interface AttemptCall : Call {
+
+    /**
+     * Runs the call and suspends until its response headers arrive, or throws the failure that
+     * ended it. Cancelling the awaiting coroutine cancels the call.
+     */
+    suspend fun await(): Response
+}
+
 /** The transport entry the pipeline drives. [CronetTransport.newCall] satisfies it. */
 internal fun interface AttemptTransport {
-    fun newCall(request: Request, listener: TransportListener?): Call
+    fun newCall(request: Request, listener: TransportListener?): AttemptCall
 }
 
 /**

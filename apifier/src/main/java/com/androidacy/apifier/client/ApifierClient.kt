@@ -83,7 +83,7 @@ internal class CronetClientEngine(
 
     override val provider: String = transport.provider
 
-    override fun newCall(request: Request, listener: TransportListener?): Call =
+    override fun newCall(request: Request, listener: TransportListener?): AttemptCall =
         transport.newCall(request, listener)
 
     /**

@@ -420,7 +420,7 @@ class ApifierClientTest {
         override val provider = "fake"
         override val providerReport = mapOf("fake:1" to HttpClientBuilder.PROVIDER_IN_USE)
 
-        override fun newCall(request: Request, listener: TransportListener?): Call {
+        override fun newCall(request: Request, listener: TransportListener?): AttemptCall {
             synchronized(requests) { requests.add(request) }
             newCallThrows?.let { throw it }
             return FakeCall(request, listener)
@@ -442,7 +442,7 @@ class ApifierClientTest {
         private inner class FakeCall(
             private val request: Request,
             private val listener: TransportListener?
-        ) : Call {
+        ) : AttemptCall {
 
             private val canceled = AtomicBoolean(false)
             private val delivered = AtomicBoolean(false)
@@ -463,6 +463,8 @@ class ApifierClientTest {
                     listener?.onTransferComplete(0, 0)
                 }
             }
+
+            override suspend fun await(): Response = throw UnsupportedOperationException()
 
             @Deprecated("Blocking bridge over the async path; prefer enqueue.")
             override fun execute(): Response = throw UnsupportedOperationException()

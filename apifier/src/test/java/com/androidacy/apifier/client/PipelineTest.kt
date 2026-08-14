@@ -21,7 +21,6 @@ import com.androidacy.apifier.dns.PinnedRootTrust
 import com.androidacy.apifier.dns.ProtectedDomainCheck
 import com.androidacy.apifier.dns.TrustedResolver
 import com.androidacy.apifier.http.ApifierException
-import com.androidacy.apifier.http.Call
 import com.androidacy.apifier.http.Callback
 import com.androidacy.apifier.http.Cookie
 import com.androidacy.apifier.http.CookieJar
@@ -700,7 +699,7 @@ class PipelineTest {
     private class FakeTransport(private val steps: List<Step>) {
         val seen = mutableListOf<Request>()
 
-        fun newCall(request: Request, listener: TransportListener?): Call {
+        fun newCall(request: Request, listener: TransportListener?): AttemptCall {
             val step = synchronized(seen) {
                 seen.add(request)
                 steps[minOf(seen.size - 1, steps.size - 1)]
@@ -717,7 +716,7 @@ class PipelineTest {
         private val request: Request,
         private val listener: TransportListener?,
         private val step: Step
-    ) : Call {
+    ) : AttemptCall {
         private val canceled = AtomicBoolean(false)
         private val delivered = AtomicBoolean(false)
         private val cancelSignal = CountDownLatch(1)
@@ -738,6 +737,8 @@ class PipelineTest {
                 }
             }
         }
+
+        override suspend fun await(): Response = throw UnsupportedOperationException()
 
         @Deprecated("Blocking bridge over the async path; prefer enqueue.")
         override fun execute(): Response = throw UnsupportedOperationException()

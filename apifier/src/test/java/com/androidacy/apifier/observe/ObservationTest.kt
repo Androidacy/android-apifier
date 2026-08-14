@@ -15,6 +15,7 @@
  */
 package com.androidacy.apifier.observe
 
+import com.androidacy.apifier.client.AttemptCall
 import com.androidacy.apifier.client.BreakerRegistry
 import com.androidacy.apifier.client.CallOptions
 import com.androidacy.apifier.client.CircuitBreakerConfig
@@ -28,7 +29,6 @@ import com.androidacy.apifier.dns.PinnedRootTrust
 import com.androidacy.apifier.dns.ProtectedDomainCheck
 import com.androidacy.apifier.dns.TrustedResolver
 import com.androidacy.apifier.http.ApifierException
-import com.androidacy.apifier.http.Call
 import com.androidacy.apifier.http.Callback
 import com.androidacy.apifier.http.ErrorCode
 import com.androidacy.apifier.http.Headers
@@ -558,7 +558,7 @@ class ObservationTest {
 
         val seenCount: Int get() = seen.get()
 
-        fun newCall(request: Request, listener: TransportListener?): Call {
+        fun newCall(request: Request, listener: TransportListener?): AttemptCall {
             val index = seen.getAndIncrement()
             val step = steps[minOf(index, steps.size - 1)]
             return FakeCall(request, listener, step)
@@ -574,7 +574,7 @@ class ObservationTest {
         private val request: Request,
         private val listener: TransportListener?,
         private val step: Step
-    ) : Call {
+    ) : AttemptCall {
         private val canceled = AtomicBoolean(false)
         private val delivered = AtomicBoolean(false)
 
@@ -594,6 +594,8 @@ class ObservationTest {
                 }
             }
         }
+
+        override suspend fun await(): Response = throw UnsupportedOperationException()
 
         @Deprecated("Blocking bridge over the async path; prefer enqueue.")
         override fun execute(): Response = throw UnsupportedOperationException()
