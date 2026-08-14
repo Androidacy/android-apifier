@@ -32,10 +32,12 @@ import com.androidacy.apifier.http.RequestBody.Companion.asRequestBody
 import com.androidacy.apifier.http.RequestBody.Companion.toRequestBody
 import com.androidacy.apifier.http.Response
 import com.androidacy.apifier.observe.Observation
+import com.androidacy.apifier.observe.RequestEvent
 import com.androidacy.apifier.observe.RequestObserver
 import com.androidacy.apifier.progress.ProgressListener
 import com.androidacy.apifier.security.PublicSuffixList
 import com.androidacy.apifier.security.SecureCookieJar
+import kotlinx.coroutines.flow.SharedFlow
 import org.chromium.net.CronetEngine
 import java.io.Closeable
 import java.io.File
@@ -293,11 +295,18 @@ class ApifierClient internal constructor(
         return enqueue(requestBuilder.build(), callback)
     }
 
+    /** Every [RequestEvent] this client's calls report, across every request. */
+    val events: SharedFlow<RequestEvent> get() = observation.events
+
     /** Registers [observer] for every call this client runs. Events arrive off the network thread. */
+    @Suppress("DEPRECATION")
+    @Deprecated("RequestEvent carries no call identity, but a global observer never needed one.", ReplaceWith("events"))
     fun addObserver(observer: RequestObserver) {
         observation.addObserver(observer)
     }
 
+    @Suppress("DEPRECATION")
+    @Deprecated("RequestEvent carries no call identity, but a global observer never needed one.", ReplaceWith("events"))
     fun removeObserver(observer: RequestObserver) {
         observation.removeObserver(observer)
     }

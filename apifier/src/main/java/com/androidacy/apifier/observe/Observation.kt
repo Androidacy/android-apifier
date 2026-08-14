@@ -17,13 +17,24 @@ package com.androidacy.apifier.observe
 
 import android.util.Log
 import com.androidacy.apifier.http.ErrorCode
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.onSubscription
+import kotlinx.coroutines.launch
 import java.io.Closeable
-import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Whether an attempt reached a response or failed before one arrived. */
 enum class Outcome { SUCCESS, FAILED }
@@ -52,31 +63,65 @@ data class RequestEvent(
     val willRetry: Boolean
 )
 
-/** Receives [RequestEvent]s. Callbacks run on [Observation]'s executor, never the network thread. */
+/** Receives [RequestEvent]s. Callbacks run off the emitting (network) thread. */
+@Deprecated(
+    "RequestEvent carries no call identity, but a global observer never needed one. " +
+        "Replaced by ApifierClient.events for the client-wide feed; CallOptions.observer is " +
+        "unchanged for per-call terminal events.",
+    ReplaceWith("events")
+)
 fun interface RequestObserver {
     fun onEvent(event: RequestEvent)
 }
 
 /**
- * Fans a [RequestEvent] out to registered global observers and, for the attempt that ends a
- * logical call, an optional per-request observer.
+ * Fans a [RequestEvent] out through [events] and, for the attempt that ends a logical call, an
+ * optional per-request observer.
  *
- * [emit] enqueues and returns without waiting: a slow or throwing observer degrades observation,
- * never the caller. Every dispatch is caught so one observer's exception cannot stop another's
- * delivery, or the request thread that called [emit].
+ * [emit] uses `tryEmit` and never suspends: a slow or absent collector cannot backpressure the
+ * network path. On overflow [events] evicts its oldest buffered event; it never blocks the caller.
  */
+@Suppress("DEPRECATION")
 internal class Observation(
-    // Bounded so a stalled consumer observer cannot grow the queue without limit;
-    // DiscardOldestPolicy keeps the newest telemetry under back-pressure.
-    private val executor: ExecutorService = ThreadPoolExecutor(
-        1, 1, 0L, TimeUnit.MILLISECONDS,
-        ArrayBlockingQueue(QUEUE_CAPACITY),
-        { runnable -> Thread(runnable, "Apifier-Observation").apply { isDaemon = true } },
-        ThreadPoolExecutor.DiscardOldestPolicy()
-    )
+    dispatcher: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1)
 ) : Closeable {
 
     private val observers = CopyOnWriteArrayList<RequestObserver>()
+    private val closed = AtomicBoolean(false)
+    private val scope = CoroutineScope(SupervisorJob() + dispatcher)
+
+    // Every unit dispatched off emit() (the compat fan-out and each perRequest callback) holds
+    // this open; close() waits for it to hit zero before it stops accepting new work.
+    private val pendingDeliveries = AtomicInteger(0)
+
+    private val mutableEvents = MutableSharedFlow<RequestEvent>(
+        replay = 0,
+        extraBufferCapacity = EVENT_BUFFER_CAPACITY,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+
+    /** Every [RequestEvent] this client's pipeline reports. Collecting never backpressures a call. */
+    val events: SharedFlow<RequestEvent> = mutableEvents.asSharedFlow()
+
+    private val collectorSubscribed = CountDownLatch(1)
+
+    // Fans events out to addObserver() registrants for as long as that API exists. Subscribing
+    // is forced to finish before the constructor returns below: tryEmit on a replay=0 flow with
+    // zero subscribers drops the value, so a collector started fire-and-forget could lose every
+    // event emitted before it happened to attach.
+    private val compatCollector: Job = scope.launch {
+        mutableEvents.onSubscription { collectorSubscribed.countDown() }.collect { event ->
+            try {
+                for (observer in observers) dispatch(observer, event)
+            } finally {
+                pendingDeliveries.decrementAndGet()
+            }
+        }
+    }
+
+    init {
+        collectorSubscribed.await()
+    }
 
     fun addObserver(observer: RequestObserver) {
         observers.add(observer)
@@ -86,30 +131,34 @@ internal class Observation(
         observers.remove(observer)
     }
 
-    /**
-     * Enqueues [event] and returns without waiting. A call still in flight when [close] has
-     * already shut the executor down would otherwise throw [RejectedExecutionException] into the
-     * network thread that called this; that is dropped like any other back-pressure event.
-     */
+    /** Publishes [event] to [events] and, off the calling thread, to [perRequest]. Never throws. */
     fun emit(event: RequestEvent, perRequest: RequestObserver?) {
-        try {
-            executor.execute {
-                for (observer in observers) dispatch(observer, event)
-                perRequest?.let { dispatch(it, event) }
+        if (closed.get()) return
+        pendingDeliveries.incrementAndGet()
+        if (!mutableEvents.tryEmit(event)) pendingDeliveries.decrementAndGet()
+        if (perRequest != null) {
+            pendingDeliveries.incrementAndGet()
+            scope.launch {
+                try {
+                    dispatch(perRequest, event)
+                } finally {
+                    pendingDeliveries.decrementAndGet()
+                }
             }
-        } catch (e: RejectedExecutionException) {
-            // Closed, or saturated past DiscardOldestPolicy's own retry. Dropping the event
-            // is the documented posture: degrade, never block the caller.
         }
     }
 
-    /** Drains events already queued by [emit], then stops accepting more. */
+    /** Marks closed, then blocks until every already-emitted event has been delivered. */
     override fun close() {
-        executor.shutdown()
-        try {
-            executor.awaitTermination(CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
+        if (!closed.compareAndSet(false, true)) return
+        awaitDrain()
+        scope.cancel()
+    }
+
+    private fun awaitDrain() {
+        val deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(CLOSE_TIMEOUT_SECONDS)
+        while (pendingDeliveries.get() > 0 && System.nanoTime() < deadlineNanos) {
+            Thread.sleep(DRAIN_POLL_MILLIS)
         }
     }
 
@@ -123,7 +172,8 @@ internal class Observation(
 
     private companion object {
         const val CLOSE_TIMEOUT_SECONDS = 5L
-        const val QUEUE_CAPACITY = 1024
+        const val DRAIN_POLL_MILLIS = 5L
+        const val EVENT_BUFFER_CAPACITY = 1024
     }
 }
 
@@ -132,6 +182,7 @@ internal class Observation(
  * one `Log.d` line per event, advisory only since release builds strip logcat. The [RequestEvent]
  * API is the queryable channel for anything a consumer actually needs.
  */
+@Suppress("DEPRECATION")
 internal class LoggingObserver : RequestObserver {
     override fun onEvent(event: RequestEvent) {
         Log.d(

@@ -37,9 +37,17 @@ import com.androidacy.apifier.http.Request
 import com.androidacy.apifier.http.Response
 import com.androidacy.apifier.http.ResponseBody
 import com.androidacy.apifier.http.ResponseBody.Companion.toResponseBody
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -51,13 +59,14 @@ import java.security.cert.X509Certificate
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
-import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
+@Suppress("DEPRECATION")
+@OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 class ObservationTest {
 
@@ -172,17 +181,127 @@ class ObservationTest {
         assertEquals(20, delivered.get())
     }
 
-    /** Production change that fails this: dropping the RejectedExecutionException catch in emit(). */
+    /** Production change that fails this: letting the closed-state check in emit() fall through. */
     @Test
-    fun emitAfterCloseDoesNotThrow() {
-        // AbortPolicy, the default RejectedExecutionHandler, throws RejectedExecutionException on
-        // a post-shutdown submission; DiscardOldestPolicy (Observation's own default) swallows it
-        // silently instead, which would mask a missing catch in emit() if used here.
-        val executor = ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, LinkedBlockingQueue())
-        val observation = Observation(executor)
+    fun eventsAfterCloseAreDroppedNotThrown() {
+        val observation = Observation()
+        val seen = recordingObserver()
+        observation.addObserver(seen.first)
         observation.close()
 
         observation.emit(sampleEvent(), null)
+
+        Thread.sleep(50)
+        assertTrue(seen.second.isEmpty())
+    }
+
+    /** Production change that fails this: stopping the collector without awaiting its drain. */
+    @Test
+    fun closeDeliversAlreadyQueuedEvents() {
+        val observation = Observation()
+        val delivered = AtomicInteger(0)
+        observation.addObserver { delivered.incrementAndGet() }
+
+        observation.emit(sampleEvent(), null)
+        observation.close()
+
+        assertEquals(1, delivered.get())
+    }
+
+    /** Production change that fails this: subscribing the compatibility collector asynchronously. */
+    @Test
+    fun eventEmittedBeforeFirstCollectIsNotLost() {
+        val observation = Observation()
+        val delivered = CountDownLatch(1)
+        observation.addObserver { delivered.countDown() }
+
+        observation.emit(sampleEvent(), null)
+
+        assertTrue(delivered.await(2, TimeUnit.SECONDS))
+        observation.close()
+    }
+
+    /** Production change that fails this: dropping the compatibility collector entirely. */
+    @Test
+    fun deprecatedObserverStillReceivesEvents() {
+        val observation = Observation()
+        val seen = recordingObserver()
+        observation.addObserver(seen.first)
+
+        observation.emit(sampleEvent(), null)
+        val delivered = awaitEvents(seen.second, 1)
+
+        assertEquals(1, delivered.size)
+        assertEquals(200, delivered[0].responseCode)
+        observation.close()
+    }
+
+    /** Production change that fails this: collecting the compatibility flow with Dispatchers.Unconfined. */
+    @Test
+    fun observerRunsOffTheEmittingThread() {
+        val observation = Observation()
+        val callbackThread = AtomicReference<Thread>()
+        val delivered = CountDownLatch(1)
+        observation.addObserver {
+            callbackThread.set(Thread.currentThread())
+            delivered.countDown()
+        }
+
+        observation.emit(sampleEvent(), null)
+
+        assertTrue(delivered.await(2, TimeUnit.SECONDS))
+        assertNotEquals(Thread.currentThread(), callbackThread.get())
+        observation.close()
+    }
+
+    /** Production change that fails this: replacing the SharedFlow with a single-consumer channel. */
+    @Test
+    fun eventsReachEveryCollector() = runTest {
+        val observation = Observation()
+        val first = mutableListOf<RequestEvent>()
+        val second = mutableListOf<RequestEvent>()
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        scope.launch { observation.events.collect { first.add(it) } }
+        scope.launch { observation.events.collect { second.add(it) } }
+
+        observation.emit(sampleEvent(), null)
+
+        assertEquals(1, first.size)
+        assertEquals(1, second.size)
+        scope.cancel()
+        observation.close()
+    }
+
+    /**
+     * Production change that fails this: changing onBufferOverflow to SUSPEND. Under SUSPEND,
+     * `tryEmit` fails fast instead of dropping the oldest buffered value once a permanently stuck
+     * collector fills the buffer, so the flood's newest event would never reach a subscriber.
+     */
+    @Test
+    fun slowCollectorDropsOldestInsteadOfBlocking() = runTest {
+        val observation = Observation()
+        val release = CompletableDeferred<Unit>()
+        val collected = mutableListOf<RequestEvent>()
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        scope.launch {
+            observation.events.collect { event ->
+                if (collected.isEmpty()) release.await()
+                collected.add(event)
+            }
+        }
+
+        val total = EVENT_BUFFER_CAPACITY + 100
+        val elapsedMs = measureMillis {
+            repeat(total) { i -> observation.emit(sampleEvent(attempt = i), null) }
+        }
+        assertTrue("emit loop took ${elapsedMs}ms", elapsedMs < 2_000)
+
+        release.complete(Unit)
+
+        assertTrue("nothing dropped: ${collected.size} of $total collected", collected.size < total)
+        assertEquals(total - 1, collected.last().attempt)
+        scope.cancel()
+        observation.close()
     }
 
     @Test
@@ -321,7 +440,7 @@ class ObservationTest {
         return seen.toList()
     }
 
-    private fun sampleEvent() = RequestEvent(
+    private fun sampleEvent(attempt: Int = 1) = RequestEvent(
         outcome = Outcome.SUCCESS,
         errorCode = null,
         responseCode = 200,
@@ -331,7 +450,7 @@ class ObservationTest {
         bytesReceived = 0,
         host = HOST,
         method = "GET",
-        attempt = 1,
+        attempt = attempt,
         provider = "test",
         willRetry = false
     )
@@ -467,5 +586,8 @@ class ObservationTest {
 
     private companion object {
         const val HOST = "api.example.com"
+
+        /** Mirrors Observation's own extraBufferCapacity, so the flood test can size past it. */
+        const val EVENT_BUFFER_CAPACITY = 1024
     }
 }

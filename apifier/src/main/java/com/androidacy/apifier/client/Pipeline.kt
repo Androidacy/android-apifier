@@ -59,7 +59,10 @@ data class CallOptions(
     val maxAttempts: Int? = null,
     /** Budget for the whole call across every attempt; null takes `timeouts.call`. */
     val callTimeoutMillis: Long? = null,
-    /** Sees exactly one event for this call: the completing attempt, or the last failure. */
+    // RequestObserver is deprecated as ApifierClient's global feed, but this per-call channel
+    // has no client-wide replacement: ApifierClient.events carries no call identity to pick this
+    // call's own terminal event out of.
+    @Suppress("DEPRECATION")
     val observer: RequestObserver? = null
 )
 
