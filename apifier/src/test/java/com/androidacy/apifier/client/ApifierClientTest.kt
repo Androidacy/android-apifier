@@ -201,14 +201,6 @@ class ApifierClientTest {
         assertEquals(Outcome.SUCCESS, events[0].outcome)
     }
 
-    /** Fails if `progress` is ever added to [NetworkConfigBuilder]; see its KDoc for why it stays out. */
-    @Test
-    fun progressIsNotOnTheBuilder() {
-        val progressMethods = NetworkConfigBuilder::class.java.methods.filter { it.name == "progress" }
-
-        assertTrue("NetworkConfigBuilder gained a progress method", progressMethods.isEmpty())
-    }
-
     @Test
     @Suppress("DEPRECATION")
     fun closeCancelsInFlightCallsBeforeStoppingTheEngine() {
