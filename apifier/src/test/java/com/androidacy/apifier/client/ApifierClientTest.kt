@@ -16,6 +16,7 @@
 package com.androidacy.apifier.client
 
 import android.content.Context
+import android.util.Log
 import androidx.test.core.app.ApplicationProvider
 import com.androidacy.apifier.http.ApifierException
 import com.androidacy.apifier.http.Call
@@ -41,6 +42,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.shadows.ShadowLog
 import java.io.IOException
 import java.net.ServerSocket
 import java.util.Collections
@@ -330,15 +332,14 @@ class ApifierClientTest {
     }
 
     @Test
-    fun blockingExecuteOnTheMainThreadIsRecorded() {
+    fun blockingExecuteOnTheMainThreadWarns() {
         val engine = FakeEngine()
         val client = clientOf(engine)
-
-        assertEquals(0L, client.blockingCallsOnMainThread)
+        ShadowLog.clear()
 
         @Suppress("DEPRECATION")
         client.call(Request.Builder().url(URL).get().build()).execute().close()
-        assertEquals(1L, client.blockingCallsOnMainThread)
+        assertEquals(1, ShadowLog.getLogs().count { it.type == Log.WARN && "main thread" in it.msg })
 
         val worker = thread(isDaemon = true) {
             @Suppress("DEPRECATION")
@@ -346,7 +347,11 @@ class ApifierClientTest {
         }
         worker.join(10_000)
 
-        assertEquals("a worker thread is not the UI thread", 1L, client.blockingCallsOnMainThread)
+        assertEquals(
+            "a worker thread is not the UI thread",
+            1,
+            ShadowLog.getLogs().count { it.type == Log.WARN && "main thread" in it.msg }
+        )
         client.close()
     }
 

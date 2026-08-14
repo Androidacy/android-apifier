@@ -47,7 +47,6 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 
 /** Tag marker to skip automatic retries on a per-request basis. */
 object NoRetry
@@ -210,15 +209,6 @@ class ApifierClient internal constructor(
     private val closed = AtomicBoolean(false)
 
     private val inCallback: ThreadLocal<Boolean> = ThreadLocal.withInitial { false }
-
-    private val mainThreadBlockingCalls = AtomicLong()
-
-    /**
-     * How many times [Call.execute] has been entered on the main thread, which blocks the UI and
-     * risks an ANR. Release builds strip the accompanying log, so this is the only signal that
-     * survives to be asserted on or reported.
-     */
-    val blockingCallsOnMainThread: Long get() = mainThreadBlockingCalls.get()
 
     /**
      * Provider selection outcome in ladder order. Keys are `name:version`, values are the
@@ -415,7 +405,6 @@ class ApifierClient internal constructor(
         override fun execute(): Response {
             begin()
             if (Looper.getMainLooper().isCurrentThread) {
-                mainThreadBlockingCalls.incrementAndGet()
                 Log.w(TAG, "HTTP request on main thread; this will block the UI and may cause ANR")
             }
             try {
