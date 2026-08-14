@@ -408,7 +408,7 @@ class ApifierClient internal constructor(
                 Log.w(TAG, "HTTP request on main thread; this will block the UI and may cause ANR")
             }
             try {
-                return pipeline.execute(request, options, state)
+                return pipeline.executeBlocking(request, options, state)
             } catch (e: Throwable) {
                 inFlight.remove(this)
                 throw asDeclaredFailure(e)
@@ -427,7 +427,7 @@ class ApifierClient internal constructor(
 
         private fun run(callback: Callback) {
             val response = try {
-                pipeline.execute(request, options, state)
+                pipeline.executeBlocking(request, options, state)
             } catch (e: Throwable) {
                 inFlight.remove(this)
                 // The consumer is owed exactly one terminal callback. An interrupt during a

@@ -16,6 +16,7 @@
 package com.androidacy.apifier.observe
 
 import com.androidacy.apifier.client.AttemptCall
+import com.androidacy.apifier.client.executeBlocking
 import com.androidacy.apifier.client.BreakerRegistry
 import com.androidacy.apifier.client.CallOptions
 import com.androidacy.apifier.client.CircuitBreakerConfig
@@ -29,7 +30,6 @@ import com.androidacy.apifier.dns.PinnedRootTrust
 import com.androidacy.apifier.dns.ProtectedDomainCheck
 import com.androidacy.apifier.dns.TrustedResolver
 import com.androidacy.apifier.http.ApifierException
-import com.androidacy.apifier.http.Callback
 import com.androidacy.apifier.http.ErrorCode
 import com.androidacy.apifier.http.Headers
 import com.androidacy.apifier.http.Protocol
@@ -42,6 +42,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -64,6 +65,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
+import kotlin.coroutines.resumeWithException
 
 @Suppress("DEPRECATION")
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -85,7 +87,7 @@ class ObservationTest {
         observation.addObserver(events.first)
         val pipeline = pipelineOf(transport, config(retry = RetryConfig(maxAttempts = 2)), observation)
 
-        pipeline.execute(request(), CallOptions(), PipelineCall()).close()
+        pipeline.executeBlocking(request(), CallOptions(), PipelineCall()).close()
         val seen = awaitEvents(events.second, 2)
 
         assertEquals(listOf(1, 2), seen.map { it.attempt })
@@ -100,7 +102,7 @@ class ObservationTest {
         val pipeline = pipelineOf(transport, config(retry = RetryConfig(maxAttempts = 2)), observation)
         val perRequest = recordingObserver()
 
-        pipeline.execute(request(), CallOptions(observer = perRequest.first), PipelineCall()).close()
+        pipeline.executeBlocking(request(), CallOptions(observer = perRequest.first), PipelineCall()).close()
         val seen = awaitEvents(perRequest.second, 1)
 
         assertEquals(1, seen.size)
@@ -118,7 +120,7 @@ class ObservationTest {
         val perRequest = recordingObserver()
 
         runCatching {
-            pipeline.execute(request(), CallOptions(observer = perRequest.first), PipelineCall())
+            pipeline.executeBlocking(request(), CallOptions(observer = perRequest.first), PipelineCall())
         }
         val seen = awaitEvents(perRequest.second, 1)
 
@@ -135,7 +137,7 @@ class ObservationTest {
         observation.addObserver(events.first)
         val pipeline = pipelineOf(transport, config(), observation)
 
-        runCatching { pipeline.execute(request(), CallOptions(), PipelineCall()) }
+        runCatching { pipeline.executeBlocking(request(), CallOptions(), PipelineCall()) }
         val seen = awaitEvents(events.second, 1)
 
         assertEquals(Outcome.FAILED, seen[0].outcome)
@@ -337,7 +339,7 @@ class ObservationTest {
         observation.addObserver(events.first)
         val pipeline = pipelineOf(transport, config(), observation)
 
-        pipeline.execute(request(), CallOptions(), PipelineCall()).close()
+        pipeline.executeBlocking(request(), CallOptions(), PipelineCall()).close()
         val seen = awaitEvents(events.second, 1)
 
         assertEquals(42L, seen[0].ttfbMillis)
@@ -359,7 +361,7 @@ class ObservationTest {
         observation.addObserver(events.first)
         val pipeline = pipelineOf(transport, config(), observation)
 
-        pipeline.execute(request(), CallOptions(), PipelineCall()).close()
+        pipeline.executeBlocking(request(), CallOptions(), PipelineCall()).close()
         assertTrue("event delivered before the transport signalled completion", events.second.isEmpty())
 
         gate.countDown()
@@ -379,7 +381,7 @@ class ObservationTest {
         val perRequest = recordingObserver()
 
         val thrown = runCatching {
-            pipeline.execute(request(), CallOptions(observer = perRequest.first), PipelineCall())
+            pipeline.executeBlocking(request(), CallOptions(observer = perRequest.first), PipelineCall())
         }.exceptionOrNull()
         val seen = awaitEvents(perRequest.second, 1)
 
@@ -401,7 +403,7 @@ class ObservationTest {
         val perRequest = recordingObserver()
 
         val thrown = runCatching {
-            pipeline.execute(request(), CallOptions(observer = perRequest.first), PipelineCall())
+            pipeline.executeBlocking(request(), CallOptions(observer = perRequest.first), PipelineCall())
         }.exceptionOrNull()
         val seen = awaitEvents(perRequest.second, 1)
 
@@ -430,7 +432,7 @@ class ObservationTest {
             call.cancel()
         }
 
-        runCatching { pipeline.execute(request(), CallOptions(observer = perRequest.first), call) }
+        runCatching { pipeline.executeBlocking(request(), CallOptions(observer = perRequest.first), call) }
 
         val perRequestSeen = awaitEvents(perRequest.second, 1)
         val globalSeen = awaitEvents(global.second, 2)
@@ -446,6 +448,31 @@ class ObservationTest {
         // that landed in backoff under the same try/catch that reported the first attempt.
         assertNull(globalSeen[1].ttfbMillis)
         assertEquals(0L, globalSeen[1].bytesReceived)
+    }
+
+    /**
+     * Production change that fails this: reporting the timeout past the terminal-event guard, so
+     * the attempt and execute's catch-all both report the same call.
+     */
+    @Test
+    fun timeoutEmitsExactlyOneTerminalEvent() {
+        val transport = FakeTransport(listOf(step(answersOnlyToCancel = true) { ok(it) }))
+        val observation = Observation()
+        val global = recordingObserver()
+        observation.addObserver(global.first)
+        val pipeline = pipelineOf(transport, config(), observation)
+
+        val thrown = runCatching {
+            pipeline.executeBlocking(request(), CallOptions(callTimeoutMillis = 200), PipelineCall())
+        }.exceptionOrNull()
+        awaitEvents(global.second, 1)
+        // A duplicate would follow on the same emit path, so let it land before counting.
+        Thread.sleep(200)
+
+        assertTrue("got $thrown", thrown is ApifierException.CallTimeout)
+        assertEquals(1, global.second.size)
+        assertEquals(Outcome.FAILED, global.second[0].outcome)
+        assertFalse(global.second[0].willRetry)
     }
 
     private fun measureMillis(block: () -> Unit): Long {
@@ -542,14 +569,17 @@ class ObservationTest {
         bytesSent: Long = 0,
         bytesReceived: Long = 0,
         transferGate: CountDownLatch? = null,
+        answersOnlyToCancel: Boolean = false,
         produce: (Request) -> Response
-    ) = Step(ttfbMillis, bytesSent, bytesReceived, transferGate, produce)
+    ) = Step(ttfbMillis, bytesSent, bytesReceived, transferGate, answersOnlyToCancel, produce)
 
     private class Step(
         val ttfbMillis: Long?,
         val bytesSent: Long,
         val bytesReceived: Long,
         val transferGate: CountDownLatch?,
+        /** Never answers on its own, the way a host that burns the whole call budget behaves. */
+        val answersOnlyToCancel: Boolean,
         val produce: (Request) -> Response
     )
 
@@ -577,31 +607,35 @@ class ObservationTest {
     ) : AttemptCall {
         private val canceled = AtomicBoolean(false)
         private val delivered = AtomicBoolean(false)
+        private val cancelSignal = CountDownLatch(1)
 
         override fun request(): Request = request
 
-        override fun enqueue(callback: Callback) {
+        override suspend fun await(): Response = suspendCancellableCoroutine { continuation ->
+            continuation.invokeOnCancellation { cancel() }
             thread(isDaemon = true) {
                 step.ttfbMillis?.let { listener?.onResponseStarted(it, request.uri) }
+                if (step.answersOnlyToCancel) {
+                    cancelSignal.await(10, TimeUnit.SECONDS)
+                    deliver { continuation.resumeWithException(ApifierException.Cancelled()) }
+                    listener?.onTransferComplete(step.bytesSent, step.bytesReceived)
+                    return@thread
+                }
                 try {
                     val response = step.produce(request)
-                    deliver { callback.onResponse(this, response) }
+                    deliver { continuation.resume(response) { _, undelivered, _ -> undelivered.close() } }
                     step.transferGate?.await(5, TimeUnit.SECONDS)
                     listener?.onTransferComplete(step.bytesSent, step.bytesReceived)
                 } catch (e: IOException) {
-                    deliver { callback.onFailure(this, e) }
+                    deliver { continuation.resumeWithException(e) }
                     listener?.onTransferComplete(step.bytesSent, step.bytesReceived)
                 }
             }
         }
 
-        override suspend fun await(): Response = throw UnsupportedOperationException()
-
-        @Deprecated("Blocking bridge over the async path; prefer enqueue.")
-        override fun execute(): Response = throw UnsupportedOperationException()
-
         override fun cancel() {
             canceled.set(true)
+            cancelSignal.countDown()
         }
 
         override fun isCanceled(): Boolean = canceled.get()

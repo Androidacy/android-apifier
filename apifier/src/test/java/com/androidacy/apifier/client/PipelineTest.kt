@@ -21,7 +21,6 @@ import com.androidacy.apifier.dns.PinnedRootTrust
 import com.androidacy.apifier.dns.ProtectedDomainCheck
 import com.androidacy.apifier.dns.TrustedResolver
 import com.androidacy.apifier.http.ApifierException
-import com.androidacy.apifier.http.Callback
 import com.androidacy.apifier.http.Cookie
 import com.androidacy.apifier.http.CookieJar
 import com.androidacy.apifier.http.ErrorCode
@@ -38,13 +37,19 @@ import com.androidacy.apifier.http.ResponseBody.Companion.toResponseBody
 import com.androidacy.apifier.observe.Observation
 import com.androidacy.apifier.progress.Progress
 import com.androidacy.apifier.security.PublicSuffixList
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import okio.Buffer
 import okio.BufferedSource
 import okio.Source
@@ -53,6 +58,7 @@ import okio.buffer
 import org.chromium.net.UploadDataSink
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -70,6 +76,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
+import kotlin.coroutines.resumeWithException
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -90,7 +97,7 @@ class PipelineTest {
         val transport = FakeTransport(listOf(step { ok(it) }))
         val pipeline = pipelineOf(transport, config(headers = mapOf("X-K" to "global")))
 
-        pipeline.execute(request().header("X-K", "mine").build(), CallOptions(), PipelineCall()).close()
+        pipeline.executeBlocking(request().header("X-K", "mine").build(), CallOptions(), PipelineCall()).close()
 
         assertEquals(listOf("mine"), transport.seen[0].headers("X-K"))
     }
@@ -100,7 +107,7 @@ class PipelineTest {
         val transport = FakeTransport(listOf(step { ok(it) }))
         val pipeline = pipelineOf(transport, config(headers = mapOf("X-K" to "global")))
 
-        pipeline.execute(request().build(), CallOptions(), PipelineCall()).close()
+        pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall()).close()
 
         assertEquals("global", transport.seen[0].header("X-K"))
     }
@@ -117,7 +124,7 @@ class PipelineTest {
             )
         )
 
-        pipeline.execute(request().build(), CallOptions(), PipelineCall()).close()
+        pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall()).close()
 
         assertEquals(2, calls)
         assertEquals("v1", transport.seen[0].header("X-Nonce"))
@@ -135,7 +142,7 @@ class PipelineTest {
         )
         val pipeline = pipelineOf(transport, config(retry = RetryConfig(maxAttempts = 2)), jar = jar)
 
-        pipeline.execute(request().build(), CallOptions(), PipelineCall()).close()
+        pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall()).close()
 
         assertEquals(listOf("a", "b"), jar.saves.flatMap { (_, cookies) -> cookies.map { it.name } })
     }
@@ -146,7 +153,7 @@ class PipelineTest {
         val transport = FakeTransport(listOf(step { ok(it) }))
         val pipeline = pipelineOf(transport, config(), jar = jar)
 
-        pipeline.execute(request().build(), CallOptions(), PipelineCall()).close()
+        pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall()).close()
 
         assertEquals("sid=abc; theme=dark", transport.seen[0].header("Cookie"))
     }
@@ -157,7 +164,7 @@ class PipelineTest {
         val transport = FakeTransport(listOf(step { ok(it) }))
         val pipeline = pipelineOf(transport, config(), jar = jar)
 
-        pipeline.execute(
+        pipeline.executeBlocking(
             request().header("Cookie", "sid=mine").build(),
             CallOptions(),
             PipelineCall()
@@ -180,7 +187,7 @@ class PipelineTest {
         )
         val pipeline = pipelineOf(transport, config(), jar = jar)
 
-        pipeline.execute(request().build(), CallOptions(), PipelineCall()).close()
+        pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall()).close()
 
         val hopSave = jar.saves.first { (uri, _) -> uri == hop }
         assertEquals(listOf("h"), hopSave.second.map { it.name })
@@ -200,7 +207,7 @@ class PipelineTest {
         )
         val pipeline = pipelineOf(transport, config(), jar = jar)
 
-        pipeline.execute(request().build(), CallOptions(), PipelineCall()).close()
+        pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall()).close()
 
         val save = jar.saves.single()
         assertEquals(landing, save.first)
@@ -216,7 +223,7 @@ class PipelineTest {
         )
         val pipeline = pipelineOf(transport, config(retry = RetryConfig(maxAttempts = 2)))
 
-        val response = pipeline.execute(request().build(), CallOptions(), PipelineCall())
+        val response = pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall())
 
         assertEquals(200, response.code)
         assertTrue(discarded.closed)
@@ -233,7 +240,7 @@ class PipelineTest {
         val post = request().post("x".toRequestBody(null)).build()
 
         assertThrows(ApifierException.Transport::class.java) {
-            pipeline.execute(post, CallOptions(), PipelineCall())
+            pipeline.executeBlocking(post, CallOptions(), PipelineCall())
         }
 
         assertEquals(1, transport.seen.size)
@@ -247,7 +254,7 @@ class PipelineTest {
         val pipeline = pipelineOf(transport, config(retry = RetryConfig(maxAttempts = 3)))
 
         assertThrows(ApifierException.RedirectRefused::class.java) {
-            pipeline.execute(request().build(), CallOptions(), PipelineCall())
+            pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall())
         }
 
         assertEquals(1, transport.seen.size)
@@ -258,7 +265,7 @@ class PipelineTest {
         val transport = FakeTransport(listOf(step { ok(it, 500) }))
         val pipeline = pipelineOf(transport, config(retry = RetryConfig(maxAttempts = 3)))
 
-        val response = pipeline.execute(request().build(), CallOptions(maxAttempts = 1), PipelineCall())
+        val response = pipeline.executeBlocking(request().build(), CallOptions(maxAttempts = 1), PipelineCall())
 
         assertEquals(500, response.code)
         assertEquals(1, transport.seen.size)
@@ -278,7 +285,7 @@ class PipelineTest {
         )
 
         val thrown = assertThrows(ApifierException.DnsUntrusted::class.java) {
-            pipeline.execute(request().build(), CallOptions(), PipelineCall())
+            pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall())
         }
 
         assertEquals(HOST, thrown.host)
@@ -288,7 +295,7 @@ class PipelineTest {
         // An open breaker on the same host would answer first if the gate ran second.
         breaker.recordFailure()
         assertThrows(ApifierException.DnsUntrusted::class.java) {
-            pipeline.execute(request().build(), CallOptions(), PipelineCall())
+            pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall())
         }
     }
 
@@ -300,7 +307,7 @@ class PipelineTest {
         val pipeline = pipelineOf(transport, config(), breakers = breakers)
 
         val thrown = assertThrows(ApifierException.CircuitOpen::class.java) {
-            pipeline.execute(request().build(), CallOptions(), PipelineCall())
+            pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall())
         }
 
         assertEquals(HOST, thrown.host)
@@ -320,7 +327,7 @@ class PipelineTest {
             breakers = breakers
         )
 
-        pipeline.execute(request().build(), CallOptions(), PipelineCall()).close()
+        pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall()).close()
 
         assertEquals(3, transport.seen.size)
         assertTrue(breaker.isClosed)
@@ -340,7 +347,7 @@ class PipelineTest {
         )
 
         assertThrows(ApifierException.CallTimeout::class.java) {
-            pipeline.execute(request().build(), CallOptions(callTimeoutMillis = 1500), PipelineCall())
+            pipeline.executeBlocking(request().build(), CallOptions(callTimeoutMillis = 1500), PipelineCall())
         }
 
         assertEquals(2, transport.seen.size)
@@ -353,7 +360,7 @@ class PipelineTest {
         val pipeline = pipelineOf(transport, config())
 
         val response =
-            pipeline.execute(request().build(), CallOptions(callTimeoutMillis = 300), PipelineCall())
+            pipeline.executeBlocking(request().build(), CallOptions(callTimeoutMillis = 300), PipelineCall())
         val started = System.nanoTime()
         assertThrows(ApifierException.CallTimeout::class.java) { response.body.bytes() }
         val elapsedMs = (System.nanoTime() - started) / 1_000_000
@@ -375,8 +382,103 @@ class PipelineTest {
         val pipeline = pipelineOf(transport, config())
 
         assertThrows(ApifierException.CallTimeout::class.java) {
-            pipeline.execute(request().build(), CallOptions(), call)
+            pipeline.executeBlocking(request().build(), CallOptions(), call)
         }
+    }
+
+    /** Production change that fails this: awaiting the attempt on the calling thread, as a latch does. */
+    @Test
+    fun oneAttemptOccupiesNoThreadWhileTheTransportIsInFlight() {
+        val transport = FakeTransport(listOf(step(delayMs = 1_000) { ok(it) }))
+        val pipeline = pipelineOf(transport, config())
+        val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+
+        try {
+            runBlocking {
+                val scope = CoroutineScope(dispatcher)
+                val call = scope.async {
+                    pipeline.execute(request().build(), CallOptions(), PipelineCall())
+                }
+                val ranDuringTheAttempt = CompletableDeferred<Unit>()
+                scope.launch { ranDuringTheAttempt.complete(Unit) }
+
+                withTimeout(500) { ranDuringTheAttempt.await() }
+
+                assertTrue("the attempt must still be in flight", call.isActive)
+                call.await().close()
+            }
+        } finally {
+            dispatcher.close()
+        }
+    }
+
+    /** Production change that fails this: a Thread.sleep backoff, which holds the thread for the whole delay. */
+    @Test
+    fun retryBackoffDoesNotOccupyAThread() {
+        val firstAttemptAnswered = CountDownLatch(1)
+        val transport = FakeTransport(
+            listOf(step { firstAttemptAnswered.countDown(); ok(it, 500) }, step { ok(it) })
+        )
+        val pipeline = pipelineOf(transport, config(retry = RetryConfig(maxAttempts = 2)))
+        val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+
+        try {
+            runBlocking {
+                val scope = CoroutineScope(dispatcher)
+                val call = scope.async {
+                    pipeline.execute(request().build(), CallOptions(), PipelineCall())
+                }
+                assertTrue(firstAttemptAnswered.await(5, TimeUnit.SECONDS))
+                // The retry stage has to have resumed and entered backoff before the task below
+                // is queued behind it, or it would win the dispatcher without proving anything.
+                Thread.sleep(150)
+                val ranDuringBackoff = CompletableDeferred<Unit>()
+                scope.launch { ranDuringBackoff.complete(Unit) }
+
+                withTimeout(400) { ranDuringBackoff.await() }
+
+                assertEquals("the second attempt must not have started yet", 1, transport.seen.size)
+                call.await().close()
+            }
+        } finally {
+            dispatcher.close()
+        }
+    }
+
+    /** Production change that fails this: removing the cancel guard in recordTerminalFailure. */
+    @Test
+    fun nonTimeoutCancelDoesNotChargeTheBreaker() {
+        val transport = FakeTransport(listOf(step(delayMs = 5_000) { ok(it) }))
+        val breakers = BreakerRegistry(CircuitBreakerConfig(failureThreshold = 1))
+        val breaker = checkNotNull(breakers.forHost(HOST))
+        val pipeline = pipelineOf(transport, config(), breakers = breakers)
+        val call = PipelineCall()
+        thread(isDaemon = true) {
+            Thread.sleep(150)
+            call.cancel()
+        }
+
+        assertThrows(ApifierException.Cancelled::class.java) {
+            pipeline.executeBlocking(request().build(), CallOptions(), call)
+        }
+
+        assertTrue("a caller's own cancel says nothing about the host", breaker.isClosed)
+    }
+
+    /** Production change that fails this: disarming the budget when execute returns instead of at close. */
+    @Test
+    fun budgetSurvivesTheReturnAndDisarmsAtClose() {
+        val transport = FakeTransport(listOf(step { ok(it) }))
+        val pipeline = pipelineOf(transport, config())
+        val streaming = PipelineCall()
+        val closed = PipelineCall()
+
+        pipeline.executeBlocking(request().build(), CallOptions(callTimeoutMillis = 200), streaming)
+        pipeline.executeBlocking(request().build(), CallOptions(callTimeoutMillis = 200), closed).close()
+        Thread.sleep(600)
+
+        assertTrue("a body still in hand leaves the budget armed", streaming.isTimedOut)
+        assertFalse("closing the body disarms the budget", closed.isTimedOut)
     }
 
     @Test
@@ -393,7 +495,7 @@ class PipelineTest {
         val worker = thread(isDaemon = true) {
             outcome.set(
                 runCatching {
-                    pipeline.execute(request().build(), CallOptions(), PipelineCall()).close()
+                    pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall()).close()
                 }.exceptionOrNull()
             )
         }
@@ -418,7 +520,7 @@ class PipelineTest {
 
         val started = System.nanoTime()
         assertThrows(ApifierException.Cancelled::class.java) {
-            pipeline.execute(request().build(), CallOptions(), call)
+            pipeline.executeBlocking(request().build(), CallOptions(), call)
         }
         val elapsedMs = (System.nanoTime() - started) / 1_000_000
 
@@ -495,7 +597,7 @@ class PipelineTest {
         val pipeline = pipelineOf(transport, config())
         val sink = MutableSharedFlow<Progress>(extraBufferCapacity = 1)
 
-        pipeline.execute(request().build(), CallOptions(progress = sink), PipelineCall()).close()
+        pipeline.executeBlocking(request().build(), CallOptions(progress = sink), PipelineCall()).close()
 
         assertSame(sink, transport.seen[0].tag(ProgressSink::class.java)?.flow)
     }
@@ -709,8 +811,9 @@ class PipelineTest {
     }
 
     /**
-     * Mirrors the contract [CronetCall] gives the pipeline: exactly one terminal callback, and a
-     * cancel that produces one promptly instead of waiting out the scripted delay.
+     * Mirrors the contract [CronetCall] gives the pipeline: exactly one terminal outcome, and a
+     * cancel that produces one promptly instead of waiting out the scripted delay. The scripted
+     * work runs on its own thread, so awaiting it never occupies the caller's.
      */
     private class FakeCall(
         private val request: Request,
@@ -723,25 +826,21 @@ class PipelineTest {
 
         override fun request(): Request = request
 
-        override fun enqueue(callback: Callback) {
+        override suspend fun await(): Response = suspendCancellableCoroutine { continuation ->
+            continuation.invokeOnCancellation { cancel() }
             thread(isDaemon = true) {
                 if (cancelSignal.await(step.delayMs, TimeUnit.MILLISECONDS)) {
-                    deliver { callback.onFailure(this, ApifierException.Cancelled()) }
+                    deliver { continuation.resumeWithException(ApifierException.Cancelled()) }
                     return@thread
                 }
                 try {
                     val response = step.produce(request, listener, cancelSignal)
-                    deliver { callback.onResponse(this, response) }
+                    deliver { continuation.resume(response) { _, undelivered, _ -> undelivered.close() } }
                 } catch (e: IOException) {
-                    deliver { callback.onFailure(this, e) }
+                    deliver { continuation.resumeWithException(e) }
                 }
             }
         }
-
-        override suspend fun await(): Response = throw UnsupportedOperationException()
-
-        @Deprecated("Blocking bridge over the async path; prefer enqueue.")
-        override fun execute(): Response = throw UnsupportedOperationException()
 
         override fun cancel() {
             canceled.set(true)

@@ -70,7 +70,7 @@ internal class CronetCall(
     private val listener: TransportListener?,
     private val deliveryExecutor: Executor,
     private val urlRequestFactory: UrlRequestFactory
-) : AttemptCall {
+) : AttemptCall, Call {
 
     private companion object {
         const val MAX_REDIRECTS = 20

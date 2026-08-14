@@ -19,7 +19,6 @@ import android.net.Uri
 import com.androidacy.apifier.dns.ProtectedDomainCheck
 import com.androidacy.apifier.http.ApifierException
 import com.androidacy.apifier.http.Call
-import com.androidacy.apifier.http.Callback
 import com.androidacy.apifier.http.Cookie
 import com.androidacy.apifier.http.CookieJar
 import com.androidacy.apifier.http.ErrorCode
@@ -38,14 +37,15 @@ import com.androidacy.apifier.patterns.CircuitBreaker
 import com.androidacy.apifier.patterns.ExponentialBackoff
 import com.androidacy.apifier.progress.Progress
 import com.androidacy.apifier.security.PublicSuffixList
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.runBlocking
 import okio.Buffer
 import okio.BufferedSource
 import okio.ForwardingSource
 import okio.Source
 import okio.buffer
 import java.io.IOException
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -85,13 +85,19 @@ internal class ProgressSink(val flow: MutableSharedFlow<Progress>)
  * Separate from [Call], which is public surface: something a caller hands in as a [Call] does not
  * offer this contract.
  */
-internal interface AttemptCall : Call {
+internal interface AttemptCall {
+
+    fun request(): Request
 
     /**
      * Runs the call and suspends until its response headers arrive, or throws the failure that
      * ended it. Cancelling the awaiting coroutine cancels the call.
      */
     suspend fun await(): Response
+
+    fun cancel()
+
+    fun isCanceled(): Boolean
 }
 
 /** The transport entry the pipeline drives. [CronetTransport.newCall] satisfies it. */
@@ -136,7 +142,7 @@ internal class PipelineCall {
     private val timedOut = AtomicBoolean(false)
 
     @Volatile
-    var inFlight: Call? = null
+    var inFlight: AttemptCall? = null
 
     @Volatile
     var attempt: Int = 0
@@ -177,8 +183,6 @@ internal class PipelineCall {
 /**
  * Runs one logical call as ordered stages over [transport]: call timeout, trust gate, circuit
  * breaker, retry, headers, cookies, progress.
- *
- * [execute] blocks and belongs on a worker thread.
  */
 internal class Pipeline(
     private val transport: AttemptTransport,
@@ -200,7 +204,7 @@ internal class Pipeline(
         if (config.logRequests) observation.addObserver(LoggingObserver())
     }
 
-    fun execute(request: Request, options: CallOptions, call: PipelineCall): Response {
+    suspend fun execute(request: Request, options: CallOptions, call: PipelineCall): Response {
         val host = checkNotNull(request.uri.host) { "request has no host" }
         val timeoutMs = options.callTimeoutMillis ?: config.timeouts.call.inWholeMilliseconds
         val deadlineAt = System.currentTimeMillis() + timeoutMs
@@ -218,7 +222,7 @@ internal class Pipeline(
             gateTrust(host, deadlineAt)
             val breaker = breakers.forHost(host)
             if (breaker != null && !breaker.checkState()) throw ApifierException.CircuitOpen(host)
-            attempts(request, options, call, breaker, timeoutMs, deadlineAt, host)
+            attempts(request, options, call, breaker, timeoutMs, host)
         } catch (e: Throwable) {
             timeoutTask.cancel(false)
             // Several paths end a call without reaching reportAttempt: the trust gate, the
@@ -251,13 +255,12 @@ internal class Pipeline(
         if (check.shouldBlock(host)) throw ApifierException.DnsUntrusted(host)
     }
 
-    private fun attempts(
+    private suspend fun attempts(
         request: Request,
         options: CallOptions,
         call: PipelineCall,
         breaker: CircuitBreaker?,
         timeoutMs: Long,
-        deadlineAt: Long,
         host: String
     ): Response {
         val retry = config.retryConfig
@@ -274,7 +277,7 @@ internal class Pipeline(
             val metrics = AttemptMetrics()
             val attemptStartNanos = System.nanoTime()
             try {
-                val response = attemptOnce(prepared, call, timeoutMs, deadlineAt, metrics)
+                val response = attemptOnce(prepared, call, metrics)
                 val willRetry = response.code >= 500 && attempt < maxAttempts - 1 && retry.retryOn5xx &&
                     (!retry.retryIdempotentOnly || idempotent)
                 reportAttempt(
@@ -307,7 +310,7 @@ internal class Pipeline(
             }
             // Outside the try/catch above, so a cancel or timeout during backoff is not
             // re-caught and reported a second time against this attempt.
-            backoffSleep(backoff.calculateDelay(attempt), call, timeoutMs)
+            backoffWait(backoff.calculateDelay(attempt), call, timeoutMs)
             attempt++
         }
         error("retry loop ended without an outcome")
@@ -339,16 +342,11 @@ internal class Pipeline(
         builder.header("Cookie", cookies.joinToString("; ") { "${it.name}=${it.value}" })
     }
 
-    private fun attemptOnce(
+    private suspend fun attemptOnce(
         request: Request,
         call: PipelineCall,
-        timeoutMs: Long,
-        deadlineAt: Long,
         metrics: AttemptMetrics
     ): Response {
-        val done = CountDownLatch(1)
-        val result = AtomicReference<Response?>()
-        val failure = AtomicReference<IOException?>()
         // A redirect the transport followed means the answering host is not the one addressed, and
         // its Set-Cookie headers belong to it. Saving them against the origin would let any host
         // the origin redirects to plant a cookie the origin then sends back.
@@ -372,30 +370,10 @@ internal class Pipeline(
         call.inFlight = transportCall
         if (call.isCanceled) transportCall.cancel()
 
-        transportCall.enqueue(object : Callback {
-            override fun onResponse(call: Call, response: Response) {
-                result.set(response)
-                done.countDown()
-            }
-
-            override fun onFailure(call: Call, e: IOException) {
-                failure.set(e)
-                done.countDown()
-            }
-        })
-
-        // The transport owes exactly one terminal callback, including after a cancel, but an
-        // unbounded wait here would strand the caller for good on the day it does not deliver.
-        val wait = (deadlineAt - System.currentTimeMillis()).coerceAtLeast(0) + TERMINAL_CALLBACK_GRACE_MS
-        if (!done.await(wait, TimeUnit.MILLISECONDS)) {
-            transportCall.cancel()
-            throw ApifierException.CallTimeout(timeoutMs)
-        }
+        val response = transportCall.await()
         // inFlight stays set: the body is still streaming through this call, so a cancel after
         // the headers arrive has to reach it.
 
-        failure.get()?.let { throw it }
-        val response = checkNotNull(result.get())
         saveCookies(answeredBy.get(), response.headers)
         return response
     }
@@ -425,20 +403,12 @@ internal class Pipeline(
     }
 
     /** Sliced so a cancel lands within one slice instead of after the whole backoff. */
-    private fun backoffSleep(delayMs: Long, call: PipelineCall, timeoutMs: Long) {
+    private suspend fun backoffWait(delayMs: Long, call: PipelineCall, timeoutMs: Long) {
         var remaining = delayMs
         while (remaining > 0) {
             surrenderIfDone(call, timeoutMs)
             val slice = remaining.coerceAtMost(BACKOFF_SLICE_MS)
-            try {
-                Thread.sleep(slice)
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
-                // An interrupted worker thread ends this call. Recording it on the call keeps a
-                // pool shutdown from charging every in-flight host with a failure.
-                call.cancel()
-                throw ApifierException.Cancelled()
-            }
+            delay(slice)
             remaining -= slice
         }
         surrenderIfDone(call, timeoutMs)
@@ -542,10 +512,24 @@ internal class Pipeline(
         val IDEMPOTENT_METHODS = setOf("GET", "HEAD")
         const val BACKOFF_SLICE_MS = 50L
         const val TRUST_VERDICT_WAIT_MS = 2_000L
-        const val TERMINAL_CALLBACK_GRACE_MS = 250L
         const val NANOS_PER_MILLI = 1_000_000L
     }
 }
+
+/**
+ * Runs [Pipeline.execute] on the calling thread, for the deprecated blocking [Call.execute].
+ *
+ * An interrupt is the only cancellation signal a blocking caller has, and [kotlinx.coroutines.runBlocking]
+ * reports it as an [InterruptedException] that says nothing to the transport still in flight.
+ */
+internal fun Pipeline.executeBlocking(request: Request, options: CallOptions, call: PipelineCall): Response =
+    try {
+        runBlocking { execute(request, options, call) }
+    } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        call.cancel()
+        throw ApifierException.Cancelled()
+    }
 
 /**
  * Per-attempt timing and byte counts, filled from [TransportListener] as the attempt runs.

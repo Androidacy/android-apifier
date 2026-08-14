@@ -31,6 +31,7 @@ import com.androidacy.apifier.observe.RequestEvent
 import com.androidacy.apifier.observe.RequestObserver
 import com.androidacy.apifier.progress.Progress
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.suspendCancellableCoroutine
 import org.chromium.net.CronetProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -51,6 +52,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
+import kotlin.coroutines.resumeWithException
 
 @RunWith(RobolectricTestRunner::class)
 class ApifierClientTest {
@@ -450,24 +452,22 @@ class ApifierClientTest {
 
             override fun request(): Request = request
 
-            override fun enqueue(callback: Callback) {
+            override suspend fun await(): Response = suspendCancellableCoroutine { continuation ->
+                continuation.invokeOnCancellation { cancel() }
                 thread(isDaemon = true) {
                     started.countDown()
                     if (hang) cancelSignal.await(30, TimeUnit.SECONDS)
                     if (canceled.get()) {
-                        deliver { callback.onFailure(this, ApifierException.Cancelled()) }
+                        deliver { continuation.resumeWithException(ApifierException.Cancelled()) }
                     } else {
                         listener?.onResponseStarted(0, request.uri)
-                        deliver { callback.onResponse(this, respond(request)) }
+                        deliver {
+                            continuation.resume(respond(request)) { _, undelivered, _ -> undelivered.close() }
+                        }
                     }
                     listener?.onTransferComplete(0, 0)
                 }
             }
-
-            override suspend fun await(): Response = throw UnsupportedOperationException()
-
-            @Deprecated("Blocking bridge over the async path; prefer enqueue.")
-            override fun execute(): Response = throw UnsupportedOperationException()
 
             override fun cancel() {
                 if (!canceled.compareAndSet(false, true)) return
