@@ -107,23 +107,75 @@ class ApifierClientTest {
         )
     }
 
+    /** Fails if the builder's default reaches only [ApifierClient.maxAttempts]'s derived views, not a plain [ApifierClient.send]. */
     @Test
-    fun noRetryTagLimitsAttempts() {
+    fun builderDefaultAppliesToEveryCall() {
         val engine = FakeEngine(respond = { serverError(it) })
-        val client = clientOf(engine, NetworkConfig(retryConfig = RetryConfig(maxAttempts = 2)))
+        val config = NetworkConfigBuilder().apply { maxAttempts(2) }.build()
+        val client = clientOf(engine, config)
 
-        val retried = CountDownLatch(1)
-        client.get(URL, countingCallback(retried))
-        assertTrue(retried.await(10, TimeUnit.SECONDS))
+        val response = runBlocking { client.get(URL) }
+
         assertEquals(2, engine.seen.size)
-
-        val notRetried = CountDownLatch(1)
-        val request = Request.Builder().url(URL).noRetry().get().build()
-        client.call(request).enqueue(countingCallback(notRetried))
-        assertTrue(notRetried.await(10, TimeUnit.SECONDS))
-        assertEquals(3, engine.seen.size)
-
+        response.close()
         client.close()
+    }
+
+    /** Fails if the builder default is read instead of the derived view's override. */
+    @Test
+    fun perCallModifierOverridesTheBuilderDefault() {
+        val engine = FakeEngine(respond = { serverError(it) })
+        val config = NetworkConfigBuilder().apply { maxAttempts(2) }.build()
+        val client = clientOf(engine, config)
+
+        val response = runBlocking { client.maxAttempts(3).get(URL) }
+
+        assertEquals(3, engine.seen.size)
+        response.close()
+        client.close()
+    }
+
+    /** Fails if the builder's timeout is applied unconditionally, ignoring a per-call override. */
+    @Test
+    fun builderTimeoutIsOverriddenPerCall() {
+        val engine = FakeEngine(hang = true)
+        val config = NetworkConfigBuilder().apply { timeout(20.seconds) }.build()
+        val client = clientOf(engine, config)
+
+        val thrown = assertThrows(ApifierException.CallTimeout::class.java) {
+            runBlocking { client.timeout(200.milliseconds).get(URL) }
+        }
+
+        assertEquals("the builder's timeout was used instead of the override", 200L, thrown.timeoutMillis)
+        client.close()
+    }
+
+    /**
+     * A stand-in for the deleted `NoRetry` marker, tagged onto the request the same way the
+     * removed `noRetry()` extension did. Fails if attempt-count logic special-cases any tag again.
+     */
+    private object NoRetryTagProbe
+
+    @Test
+    fun noRetryTagIsGone() {
+        val engine = FakeEngine(respond = { serverError(it) })
+        val config = NetworkConfigBuilder().apply { maxAttempts(2) }.build()
+        val client = clientOf(engine, config)
+        val request = Request.Builder().url(URL).tag(NoRetryTagProbe::class.java, NoRetryTagProbe).get().build()
+
+        val response = runBlocking { client.send(request) }
+
+        assertEquals(2, engine.seen.size)
+        response.close()
+        client.close()
+    }
+
+    /** Fails if `progress` is ever added to [NetworkConfigBuilder]; see its KDoc for why it stays out. */
+    @Test
+    fun progressIsNotOnTheBuilder() {
+        val progressMethods = NetworkConfigBuilder::class.java.methods.filter { it.name == "progress" }
+
+        assertTrue("NetworkConfigBuilder gained a progress method", progressMethods.isEmpty())
     }
 
     @Test

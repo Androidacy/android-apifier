@@ -61,13 +61,16 @@ val client = ApifierClient(context) {
 
     timeouts {
         read = 60.seconds
-        call = 90.seconds
     }
 
     retry {
-        maxAttempts = 3
         retryOn5xx = true
     }
+
+    // Same names as the per-call modifiers (client.maxAttempts(...), client.timeout(...)); a
+    // call that sets neither uses these, and a call that does overrides them.
+    maxAttempts(3)
+    timeout(90.seconds)
 
     protectedDomains("api.example.com")
     cookieStorage(MyCookieStorage())
@@ -96,13 +99,13 @@ Dynamite download, so build the client on a background thread.
 
 Observers see one event per attempt: outcome, error code, response code, elapsed and
 time-to-first-byte, bytes sent and received, host, method, attempt number, serving provider, and
-whether a retry follows. A client-wide observer sees every call; a per-call observer passed
-through `CallOptions` sees exactly one event, the attempt that ended its call.
+whether a retry follows. A client-wide observer sees every call; a per-call observer set through
+`observe` on a derived view sees exactly one event, the attempt that ended its call.
 
 ```kotlin
 client.addObserver { event -> log("${event.method} ${event.host} -> ${event.outcome}") }
 
-val call = client.call(request, CallOptions(maxAttempts = 1, observer = { report(it) }))
+val response = client.maxAttempts(1).observe { report(it) }.get("https://api.example.com/data")
 ```
 
 ## Protected Domains

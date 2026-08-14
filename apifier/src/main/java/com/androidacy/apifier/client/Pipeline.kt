@@ -57,7 +57,7 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 /** Per-call inputs the caller chooses, as opposed to the process-wide [NetworkConfig]. */
-data class CallOptions(
+internal data class CallOptions(
     /** Attempt ceiling for this call; null takes `retryConfig.maxAttempts`, and 1 means no retry. */
     val maxAttempts: Int? = null,
     /** Budget for the whole call across every attempt; null takes `timeouts.call`. */
@@ -473,7 +473,7 @@ internal class Pipeline(
         options: CallOptions
     ) {
         if (!willRetry) call.terminalEventEmitted = true
-        val perRequest = if (willRetry) null else options.observer
+        val perRequest = if (willRetry) null else options.observer ?: config.defaultObserver
         metrics.whenTransferComplete {
             observation.emit(
                 RequestEvent(
@@ -523,7 +523,7 @@ internal class Pipeline(
                 provider = provider,
                 willRetry = false
             ),
-            options.observer
+            options.observer ?: config.defaultObserver
         )
     }
 

@@ -15,6 +15,7 @@
  */
 package com.androidacy.apifier.client
 
+import com.androidacy.apifier.observe.RequestObserver
 import com.androidacy.apifier.security.CookieStorage
 import java.io.File
 import kotlin.time.Duration
@@ -37,7 +38,10 @@ data class NetworkConfig(
     /** Whether a failed comparison refuses the call. Verdicts are computed either way. */
     val enforceProtectedDomains: Boolean = true,
     /** Registers an internal `Log.d`-per-event observer. Advisory only; release logcat is stripped. */
-    val logRequests: Boolean = false
+    val logRequests: Boolean = false,
+    /** Falls back to [com.androidacy.apifier.client.Requester.observe]'s per-call observer when a call sets none. */
+    @Suppress("DEPRECATION")
+    val defaultObserver: RequestObserver? = null
 )
 
 /** Cronet engine transport settings. */
@@ -113,10 +117,33 @@ class NetworkConfigBuilder {
     private val protectedDomains = mutableListOf<String>()
     var enforceProtectedDomains: Boolean = true
     var logRequests: Boolean = false
+    @Suppress("DEPRECATION")
+    private var defaultObserver: RequestObserver? = null
 
     /** Hosts to compare against known-good resolvers before calling them. */
     fun protectedDomains(vararg domains: String) {
         protectedDomains.addAll(domains)
+    }
+
+    /** Default attempt ceiling for every call this client makes; see [Requester.maxAttempts]. */
+    fun maxAttempts(count: Int) {
+        retryConfig = retryConfig.copy(maxAttempts = count)
+    }
+
+    /** Default call budget for every call this client makes; see [Requester.timeout]. */
+    fun timeout(duration: Duration) {
+        timeouts = timeouts.copy(call = duration)
+    }
+
+    /**
+     * Default terminal-event observer for every call this client makes; see [Requester.observe].
+     * `progress` has no builder counterpart: unlike an attempt ceiling or a timeout, a byte-count
+     * sink shared by every concurrent call would interleave their counts into one meaningless
+     * stream, so it stays a per-call-only setting.
+     */
+    @Suppress("DEPRECATION")
+    fun observe(observer: RequestObserver) {
+        defaultObserver = observer
     }
 
     fun cronet(block: CronetConfigBuilder.() -> Unit) {
@@ -150,7 +177,7 @@ class NetworkConfigBuilder {
     fun build() = NetworkConfig(
         cronetConfig, timeouts, retryConfig, circuitBreakerConfig,
         cookieStorage, headers, dynamicHeaders, protectedDomains.toList(),
-        enforceProtectedDomains, logRequests
+        enforceProtectedDomains, logRequests, defaultObserver
     )
 }
 

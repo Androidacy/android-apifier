@@ -58,12 +58,6 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Duration
 
-/** Tag marker to skip automatic retries on a per-request basis. */
-object NoRetry
-
-/** Marks this request to skip automatic retries. */
-fun Request.Builder.noRetry(): Request.Builder = tag(NoRetry::class.java, NoRetry)
-
 /**
  * The engine side of the client as one unit: the calls it starts, the labels it reports, and the
  * teardown [ApifierClient.close] orders its other steps against. An interface because neither
@@ -246,13 +240,11 @@ class ApifierClient internal constructor(
      */
     internal suspend fun send(request: Request, options: CallOptions): Response {
         check(!closed.get()) { CLOSED_MESSAGE }
-        val effective =
-            if (request.tag(NoRetry::class.java) == null) options else options.copy(maxAttempts = 1)
         val state = PipelineCall()
         state.onBodyFinished = { inFlight.remove(state) }
         inFlight.add(state)
         return try {
-            pipeline.execute(request, effective, state)
+            pipeline.execute(request, options, state)
         } catch (e: Throwable) {
             inFlight.remove(state)
             // A cancelled caller must get a cancellation back; an IOException here would let
@@ -265,15 +257,13 @@ class ApifierClient internal constructor(
      * Prepares [request] for execution. The returned [Call] runs the whole pipeline once, on a
      * coroutine of the client's for [Call.enqueue] and on the calling thread for [Call.execute].
      *
-     * A request marked with [noRetry] is limited to one attempt whatever [options] asks for.
-     *
      * @throws IllegalStateException the client is closed.
      */
-    fun call(request: Request, options: CallOptions = CallOptions()): Call {
+    fun call(request: Request): Call = call(request, CallOptions())
+
+    internal fun call(request: Request, options: CallOptions): Call {
         check(!closed.get()) { CLOSED_MESSAGE }
-        val effective =
-            if (request.tag(NoRetry::class.java) == null) options else options.copy(maxAttempts = 1)
-        return ClientCall(request, effective)
+        return ClientCall(request, options)
     }
 
     /** Enqueues an async GET. Returns the [Call] for cancellation. */
