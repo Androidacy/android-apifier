@@ -82,9 +82,18 @@ sealed class ApifierException(message: String, cause: Throwable? = null) : IOExc
         override val errorCode: ErrorCode = ErrorCode.REDIRECT_REFUSED
     }
 
-    /** DoH resolution for [host] returned an untrusted or unverifiable answer. */
+    /** The protected-domain check found [host]'s system DNS answer untrusted or unverifiable. */
     class DnsUntrusted(val host: String) : ApifierException("DNS answer for host $host is untrusted") {
         override val errorCode: ErrorCode = ErrorCode.DNS_UNTRUSTED
+    }
+
+    /**
+     * A failure the pipeline does not model, carried in [cause]. Consumers are promised this
+     * hierarchy for every failure, so a raw throwable is retyped here rather than reaching them
+     * as something a `catch (IOException)` or an `is ApifierException` check would miss.
+     */
+    class Unexpected(cause: Throwable) : ApifierException(cause.toString(), cause) {
+        override val errorCode: ErrorCode = ErrorCode.OTHER
     }
 }
 

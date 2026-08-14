@@ -329,6 +329,58 @@ class ApifierClientTest {
         assertTrue(done.await(5, TimeUnit.SECONDS))
     }
 
+    @Test
+    fun blockingExecuteOnTheMainThreadIsRecorded() {
+        val engine = FakeEngine()
+        val client = clientOf(engine)
+
+        assertEquals(0L, client.blockingCallsOnMainThread)
+
+        @Suppress("DEPRECATION")
+        client.call(Request.Builder().url(URL).get().build()).execute().close()
+        assertEquals(1L, client.blockingCallsOnMainThread)
+
+        val worker = thread(isDaemon = true) {
+            @Suppress("DEPRECATION")
+            client.call(Request.Builder().url(URL).get().build()).execute().close()
+        }
+        worker.join(10_000)
+
+        assertEquals("a worker thread is not the UI thread", 1L, client.blockingCallsOnMainThread)
+        client.close()
+    }
+
+    @Test
+    fun nonIoTransportFailureSurfacesAsApifierExceptionOnBothPaths() {
+        val engine = FakeEngine(newCallThrows = IllegalStateException("engine went sideways"))
+        val client = clientOf(engine)
+
+        val thrown = assertThrows(ApifierException.Unexpected::class.java) {
+            @Suppress("DEPRECATION")
+            client.call(Request.Builder().url(URL).get().build()).execute()
+        }
+        assertEquals("engine went sideways", thrown.cause?.message)
+
+        val delivered = AtomicReference<IOException?>()
+        val done = CountDownLatch(1)
+        client.get(
+            URL,
+            object : Callback {
+                override fun onResponse(call: Call, response: Response) = done.countDown()
+
+                override fun onFailure(call: Call, e: IOException) {
+                    delivered.set(e)
+                    done.countDown()
+                }
+            }
+        )
+        assertTrue(done.await(10, TimeUnit.SECONDS))
+
+        assertTrue("got ${delivered.get()}", delivered.get() is ApifierException.Unexpected)
+        assertEquals("engine went sideways", delivered.get()?.cause?.message)
+        client.close()
+    }
+
     private fun clientOf(engine: FakeEngine, config: NetworkConfig = NetworkConfig()) =
         ApifierClient(context, config, engine)
 
@@ -356,6 +408,7 @@ class ApifierClientTest {
     private inner class FakeEngine(
         private val hang: Boolean = false,
         private val shutdownThrows: Boolean = false,
+        private val newCallThrows: Throwable? = null,
         private val respond: (Request) -> Response = { response(it) }
     ) : ClientEngine {
 
@@ -371,6 +424,7 @@ class ApifierClientTest {
 
         override fun newCall(request: Request, listener: TransportListener?): Call {
             synchronized(requests) { requests.add(request) }
+            newCallThrows?.let { throw it }
             return FakeCall(request, listener)
         }
 

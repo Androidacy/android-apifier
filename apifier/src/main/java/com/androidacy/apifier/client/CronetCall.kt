@@ -16,8 +16,6 @@
 package com.androidacy.apifier.client
 
 import android.net.Uri
-import android.os.Looper
-import android.util.Log
 import com.androidacy.apifier.http.ApifierException
 import com.androidacy.apifier.http.Call
 import com.androidacy.apifier.http.Callback
@@ -73,7 +71,6 @@ internal class CronetCall(
 ) : Call {
 
     private companion object {
-        const val TAG = "CronetCall"
         const val MAX_REDIRECTS = 20
     }
 
@@ -130,10 +127,6 @@ internal class CronetCall(
 
     @Deprecated("Blocking bridge over the async path; prefer enqueue.")
     override fun execute(): Response {
-        if (Looper.getMainLooper().isCurrentThread) {
-            Log.w(TAG, "HTTP request on main thread; this will block the UI and may cause ANR")
-        }
-
         val done = CountDownLatch(1)
         val result = AtomicReference<Response?>()
         val failure = AtomicReference<IOException?>()

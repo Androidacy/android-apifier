@@ -18,6 +18,8 @@ package com.androidacy.apifier.client
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
+import android.os.Looper
+import android.util.Log
 import com.androidacy.apifier.dns.ProtectedDomainCheck
 import com.androidacy.apifier.dns.TrustStatus
 import com.androidacy.apifier.http.ApifierException
@@ -45,6 +47,7 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /** Tag marker to skip automatic retries on a per-request basis. */
 object NoRetry
@@ -207,6 +210,15 @@ class ApifierClient internal constructor(
     private val closed = AtomicBoolean(false)
 
     private val inCallback: ThreadLocal<Boolean> = ThreadLocal.withInitial { false }
+
+    private val mainThreadBlockingCalls = AtomicLong()
+
+    /**
+     * How many times [Call.execute] has been entered on the main thread, which blocks the UI and
+     * risks an ANR. Release builds strip the accompanying log, so this is the only signal that
+     * survives to be asserted on or reported.
+     */
+    val blockingCallsOnMainThread: Long get() = mainThreadBlockingCalls.get()
 
     /**
      * Provider selection outcome in ladder order. Keys are `name:version`, values are the
@@ -402,11 +414,15 @@ class ApifierClient internal constructor(
         @Deprecated("Blocking bridge over the async path; prefer enqueue.")
         override fun execute(): Response {
             begin()
+            if (Looper.getMainLooper().isCurrentThread) {
+                mainThreadBlockingCalls.incrementAndGet()
+                Log.w(TAG, "HTTP request on main thread; this will block the UI and may cause ANR")
+            }
             try {
                 return pipeline.execute(request, options, state)
             } catch (e: Throwable) {
                 inFlight.remove(this)
-                throw e
+                throw asDeclaredFailure(e)
             }
         }
 
@@ -430,7 +446,7 @@ class ApifierClient internal constructor(
                 // The consumer is owed exactly one terminal callback. An interrupt during a
                 // shutdown, or any other non-IO failure, must not leave it waiting forever.
                 if (e is InterruptedException) Thread.currentThread().interrupt()
-                dispatch { callback.onFailure(this, e as? IOException ?: IOException(e)) }
+                dispatch { callback.onFailure(this, asDeclaredFailure(e)) }
                 return
             }
             dispatch { callback.onResponse(this, response) }
@@ -448,9 +464,13 @@ class ApifierClient internal constructor(
     }
 
     companion object {
+        private const val TAG = "ApifierClient"
         private const val DRAIN_TIMEOUT_MS = 5_000L
         private const val DRAIN_POLL_MS = 10L
         private const val CLOSED_MESSAGE = "client is closed"
+
+        private fun asDeclaredFailure(e: Throwable): IOException =
+            e as? ApifierException ?: ApifierException.Unexpected(e)
 
         operator fun invoke(context: Context, block: NetworkConfigBuilder.() -> Unit): ApifierClient {
             val config = NetworkConfigBuilder().apply(block).build()
