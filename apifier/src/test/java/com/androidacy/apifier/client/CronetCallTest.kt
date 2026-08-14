@@ -48,6 +48,7 @@ import java.util.AbstractMap
 import com.androidacy.apifier.http.Call as ApifierCall
 
 @RunWith(RobolectricTestRunner::class)
+@Suppress("DEPRECATION")
 class CronetCallTest {
 
     @Test

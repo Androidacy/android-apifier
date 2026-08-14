@@ -229,6 +229,7 @@ class ApifierClientTest {
     }
 
     @Test
+    @Suppress("DEPRECATION")
     fun closeCancelsInFlightCallsBeforeStoppingTheEngine() {
         val engine = FakeEngine(hang = true)
         val client = clientOf(engine)
@@ -278,6 +279,7 @@ class ApifierClientTest {
     }
 
     @Test
+    @Suppress("DEPRECATION")
     fun closeIsIdempotentAndCallsAfterCloseFail() {
         val engine = FakeEngine()
         val client = clientOf(engine)
@@ -295,12 +297,12 @@ class ApifierClientTest {
             prepared.enqueue(countingCallback(CountDownLatch(1)))
         }
         assertThrows(IllegalStateException::class.java) {
-            @Suppress("DEPRECATION")
             prepared.execute()
         }
     }
 
     @Test
+    @Suppress("DEPRECATION")
     fun closeReachesACallWhoseBodyOutlivedItsCallback() {
         val engine = FakeEngine()
         val client = clientOf(engine)
@@ -332,6 +334,7 @@ class ApifierClientTest {
     }
 
     @Test
+    @Suppress("DEPRECATION")
     fun closeFromAClientCallbackIsRefused() {
         val engine = FakeEngine()
         val client = clientOf(engine)
@@ -466,13 +469,135 @@ class ApifierClientTest {
         client.close()
     }
 
+    /** Fails if `run` ever dispatches both terminal callbacks instead of returning after the first. */
     @Test
+    @Suppress("DEPRECATION")
+    fun enqueueStillDeliversExactlyOneTerminalCallback() {
+        val engine = FakeEngine()
+        val client = clientOf(engine)
+        val responses = AtomicInteger()
+        val failures = AtomicInteger()
+        val done = CountDownLatch(1)
+
+        client.get(
+            URL,
+            object : Callback {
+                override fun onResponse(call: Call, response: Response) {
+                    responses.incrementAndGet()
+                    response.close()
+                    done.countDown()
+                }
+
+                override fun onFailure(call: Call, e: IOException) {
+                    failures.incrementAndGet()
+                    done.countDown()
+                }
+            }
+        )
+
+        assertTrue(done.await(10, TimeUnit.SECONDS))
+        client.close()
+        assertEquals(1, responses.get())
+        assertEquals(0, failures.get())
+    }
+
+    /** Fails if a transport failure reaches `onFailure` as a bare `IOException` instead of `asDeclaredFailure`'s wrap. */
+    @Test
+    @Suppress("DEPRECATION")
+    fun enqueueFailureStillArrivesAsApifierException() {
+        val engine = FakeEngine(newCallThrows = IOException("transport refused"))
+        val client = clientOf(engine)
+        val delivered = AtomicReference<IOException?>()
+        val done = CountDownLatch(1)
+
+        client.get(
+            URL,
+            object : Callback {
+                override fun onResponse(call: Call, response: Response) {
+                    response.close()
+                    done.countDown()
+                }
+
+                override fun onFailure(call: Call, e: IOException) {
+                    delivered.set(e)
+                    done.countDown()
+                }
+            }
+        )
+
+        assertTrue(done.await(10, TimeUnit.SECONDS))
+        client.close()
+        assertTrue("got ${delivered.get()}", delivered.get() is ApifierException)
+    }
+
+    /** Fails if `Call.cancel()` stops tracking the launched job, e.g. by no longer reaching `PipelineCall.cancel()`. */
+    @Test
+    @Suppress("DEPRECATION")
+    fun deprecatedCancelStillCancelsTheRequest() {
+        val engine = FakeEngine(hang = true)
+        val client = clientOf(engine)
+        val outcome = AtomicReference<Throwable?>()
+        val done = CountDownLatch(1)
+        val call = client.call(getRequest())
+
+        call.enqueue(object : Callback {
+            override fun onResponse(call: Call, response: Response) {
+                response.close()
+                done.countDown()
+            }
+
+            override fun onFailure(call: Call, e: IOException) {
+                outcome.set(e)
+                done.countDown()
+            }
+        })
+        assertTrue(engine.started.await(10, TimeUnit.SECONDS))
+
+        call.cancel()
+
+        assertTrue(done.await(5, TimeUnit.SECONDS))
+        assertEquals(listOf("cancel"), engine.log)
+        assertTrue("got ${outcome.get()}", outcome.get() is ApifierException.Cancelled)
+        client.close()
+    }
+
+    /** Fails if a callback is ever delivered inline from the transport's own thread instead of the client's dispatcher. */
+    @Test
+    @Suppress("DEPRECATION")
+    fun callbacksDoNotRunOnTheNetworkThread() {
+        val networkThread = AtomicReference<Thread?>()
+        val callbackThread = AtomicReference<Thread?>()
+        val engine = FakeEngine(respond = { networkThread.set(Thread.currentThread()); response(it) })
+        val client = clientOf(engine)
+        val done = CountDownLatch(1)
+
+        client.get(
+            URL,
+            object : Callback {
+                override fun onResponse(call: Call, response: Response) {
+                    callbackThread.set(Thread.currentThread())
+                    response.close()
+                    done.countDown()
+                }
+
+                override fun onFailure(call: Call, e: IOException) = done.countDown()
+            }
+        )
+
+        assertTrue(done.await(10, TimeUnit.SECONDS))
+        client.close()
+        assertTrue("network thread was never recorded", networkThread.get() != null)
+        assertTrue("callback thread was never recorded", callbackThread.get() != null)
+        assertTrue("callback ran on the network thread", networkThread.get() !== callbackThread.get())
+    }
+
+    @Test
+    @Suppress("DEPRECATION")
     fun nonIoTransportFailureSurfacesAsApifierExceptionOnBothPaths() {
         val engine = FakeEngine(newCallThrows = IllegalStateException("engine went sideways"))
         val client = clientOf(engine)
 
         val thrown = assertThrows(ApifierException.Unexpected::class.java) {
-            @Suppress("DEPRECATION")
             client.call(Request.Builder().url(URL).get().build()).execute()
         }
         assertEquals("engine went sideways", thrown.cause?.message)
@@ -752,6 +877,7 @@ class ApifierClientTest {
     private fun clientOf(engine: FakeEngine, config: NetworkConfig = NetworkConfig()) =
         ApifierClient(context, config, engine)
 
+    @Suppress("DEPRECATION")
     private fun countingCallback(latch: CountDownLatch) = object : Callback {
         override fun onResponse(call: Call, response: Response) {
             response.close()
@@ -822,8 +948,6 @@ class ApifierClientTest {
             private val delivered = AtomicBoolean(false)
             private val cancelSignal = CountDownLatch(1)
 
-            override fun request(): Request = request
-
             override suspend fun await(): Response = suspendCancellableCoroutine { continuation ->
                 continuation.invokeOnCancellation { cancel() }
                 thread(isDaemon = true) {
@@ -846,8 +970,6 @@ class ApifierClientTest {
                 record("cancel")
                 cancelSignal.countDown()
             }
-
-            override fun isCanceled(): Boolean = canceled.get()
 
             private fun deliver(outcome: () -> Unit) {
                 if (delivered.compareAndSet(false, true)) outcome()

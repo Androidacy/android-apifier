@@ -18,6 +18,10 @@ package com.androidacy.apifier.http
 /**
  * A request that has been prepared for execution. A call may be run once.
  */
+@Deprecated(
+    "The callback- and blocking-based call surface is superseded by the suspend fun send() " +
+        "on Requester. Will be removed in 4.0."
+)
 interface Call {
 
     fun request(): Request
@@ -27,6 +31,10 @@ interface Call {
      * [Callback.onResponse] and [Callback.onFailure] runs, and a transport failure arrives as
      * an [ApifierException].
      */
+    @Deprecated(
+        "Launch the suspend fun send() on a coroutine of your own instead of a Callback. " +
+            "Will be removed in 4.0."
+    )
     fun enqueue(callback: Callback)
 
     /**
@@ -34,13 +42,28 @@ interface Call {
      *
      * @throws java.io.IOException an [ApifierException] describing the failure.
      */
-    @Deprecated("Blocking bridge over the async path; prefer enqueue.")
+    @Deprecated(
+        "Blocking bridge over the suspend fun send(); call it from a coroutine instead. " +
+            "Will be removed in 4.0."
+    )
     fun execute(): Response
 
+    @Deprecated(
+        "Cancel the coroutine send() runs on instead of this call. Will be removed in 4.0."
+    )
     fun cancel()
 
+    @Deprecated(
+        "Cancellation state now belongs to the coroutine send() runs on, not this call. " +
+            "Will be removed in 4.0."
+    )
     fun isCanceled(): Boolean
 
+    @Deprecated(
+        "Build calls through ApifierClient.send() directly instead of a Factory. " +
+            "Will be removed in 4.0."
+    )
+    @Suppress("DEPRECATION")
     fun interface Factory {
         fun newCall(request: Request): Call
     }

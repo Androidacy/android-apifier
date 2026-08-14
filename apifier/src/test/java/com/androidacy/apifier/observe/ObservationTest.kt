@@ -16,7 +16,6 @@
 package com.androidacy.apifier.observe
 
 import com.androidacy.apifier.client.AttemptCall
-import com.androidacy.apifier.client.executeBlocking
 import com.androidacy.apifier.client.BreakerRegistry
 import com.androidacy.apifier.client.CallOptions
 import com.androidacy.apifier.client.CircuitBreakerConfig
@@ -42,6 +41,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
@@ -528,6 +528,10 @@ class ObservationTest {
         willRetry = false
     )
 
+    /** Runs [Pipeline.execute] synchronously; production dropped this alongside the deprecated blocking `Call.execute`. */
+    private fun Pipeline.executeBlocking(request: Request, options: CallOptions, call: PipelineCall): Response =
+        runBlocking { execute(request, options, call) }
+
     private fun request(): Request = Request.Builder().url("https://$HOST/resource").build()
 
     private fun config(retry: RetryConfig = RetryConfig()) = NetworkConfig(retryConfig = retry)
@@ -630,8 +634,6 @@ class ObservationTest {
         private val delivered = AtomicBoolean(false)
         private val cancelSignal = CountDownLatch(1)
 
-        override fun request(): Request = request
-
         override suspend fun await(): Response = suspendCancellableCoroutine { continuation ->
             continuation.invokeOnCancellation { cancel() }
             thread(isDaemon = true) {
@@ -658,8 +660,6 @@ class ObservationTest {
             canceled.set(true)
             cancelSignal.countDown()
         }
-
-        override fun isCanceled(): Boolean = canceled.get()
 
         private fun deliver(outcome: () -> Unit) {
             if (delivered.compareAndSet(false, true)) outcome()

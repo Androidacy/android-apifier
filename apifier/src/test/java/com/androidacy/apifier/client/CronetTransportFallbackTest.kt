@@ -51,6 +51,7 @@ class CronetTransportFallbackTest {
      * own frame, so no terminal callback ever runs and the call hangs.
      */
     @Test
+    @Suppress("DEPRECATION")
     fun failureBeforeResponseDeliversTerminalError() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val provider = Class.forName("org.chromium.net.impl.JavaCronetProvider")

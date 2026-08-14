@@ -719,6 +719,20 @@ class PipelineTest {
         override fun onRewindError(exception: Exception) = throw exception
     }
 
+    /**
+     * Runs [Pipeline.execute] synchronously, converting an interrupt into a cancellation the way
+     * the deprecated `ClientCall.execute` bridge does, so tests can drive a blocking caller with
+     * [Thread.interrupt] without depending on `ApifierClient`.
+     */
+    private fun Pipeline.executeBlocking(request: Request, options: CallOptions, call: PipelineCall): Response =
+        try {
+            runBlocking { execute(request, options, call) }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            call.cancel()
+            throw ApifierException.Cancelled()
+        }
+
     private fun request(): Request.Builder = Request.Builder().url("https://$HOST/resource")
 
     private fun config(
@@ -894,8 +908,6 @@ class PipelineTest {
         private val delivered = AtomicBoolean(false)
         private val cancelSignal = CountDownLatch(1)
 
-        override fun request(): Request = request
-
         override suspend fun await(): Response = suspendCancellableCoroutine { continuation ->
             continuation.invokeOnCancellation { cancel() }
             thread(isDaemon = true) {
@@ -916,8 +928,6 @@ class PipelineTest {
             canceled.set(true)
             cancelSignal.countDown()
         }
-
-        override fun isCanceled(): Boolean = canceled.get()
 
         private fun deliver(outcome: () -> Unit) {
             if (delivered.compareAndSet(false, true)) outcome()

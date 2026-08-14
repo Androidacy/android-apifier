@@ -41,7 +41,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import okio.Buffer
 import okio.BufferedSource
@@ -82,8 +81,6 @@ internal class ProgressSink(val flow: MutableSharedFlow<Progress>)
  */
 internal interface AttemptCall {
 
-    fun request(): Request
-
     /**
      * Runs the call and suspends until its response headers arrive, or throws the failure that
      * ended it. Cancelling the awaiting coroutine cancels the call.
@@ -91,8 +88,6 @@ internal interface AttemptCall {
     suspend fun await(): Response
 
     fun cancel()
-
-    fun isCanceled(): Boolean
 }
 
 /** The transport entry the pipeline drives. [CronetTransport.newCall] satisfies it. */
@@ -528,22 +523,6 @@ internal class Pipeline(
         const val NANOS_PER_MILLI = 1_000_000L
     }
 }
-
-/**
- * Runs [Pipeline.execute] on the calling thread, for the deprecated blocking [Call.execute].
- *
- * An interrupt is the only cancellation signal a blocking caller has. [kotlinx.coroutines.runBlocking]
- * turns it into a cancellation of the call and rethrows it once the call has unwound, and an
- * [InterruptedException] says nothing to the transport that call left in flight.
- */
-internal fun Pipeline.executeBlocking(request: Request, options: CallOptions, call: PipelineCall): Response =
-    try {
-        runBlocking { execute(request, options, call) }
-    } catch (_: InterruptedException) {
-        Thread.currentThread().interrupt()
-        call.cancel()
-        throw ApifierException.Cancelled()
-    }
 
 /**
  * Per-attempt timing and byte counts, filled from [TransportListener] as the attempt runs.

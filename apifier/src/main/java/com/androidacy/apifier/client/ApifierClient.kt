@@ -47,6 +47,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import org.chromium.net.CronetEngine
 import java.io.Closeable
 import java.io.File
@@ -259,38 +260,46 @@ class ApifierClient internal constructor(
      *
      * @throws IllegalStateException the client is closed.
      */
+    @Suppress("DEPRECATION")
     fun call(request: Request): Call = call(request, CallOptions())
 
+    @Suppress("DEPRECATION")
     internal fun call(request: Request, options: CallOptions): Call {
         check(!closed.get()) { CLOSED_MESSAGE }
         return ClientCall(request, options)
     }
 
     /** Enqueues an async GET. Returns the [Call] for cancellation. */
+    @Suppress("DEPRECATION")
     fun get(url: String, callback: Callback): Call =
         enqueue(Request.Builder().url(url).get().build(), callback)
 
     /** Enqueues an async POST. [contentType] defaults to JSON. Returns the [Call] for cancellation. */
+    @Suppress("DEPRECATION")
     fun post(url: String, body: String, contentType: String = "application/json", callback: Callback): Call {
         val requestBody = body.toRequestBody(contentType.toMediaTypeOrNull())
         return enqueue(Request.Builder().url(url).post(requestBody).build(), callback)
     }
 
     /** Enqueues an async DELETE. Returns the [Call] for cancellation. */
+    @Suppress("DEPRECATION")
     fun delete(url: String, callback: Callback): Call =
         enqueue(Request.Builder().url(url).delete().build(), callback)
 
     /** Enqueues an async HEAD. Returns the [Call] for cancellation. */
+    @Suppress("DEPRECATION")
     fun head(url: String, callback: Callback): Call =
         enqueue(Request.Builder().url(url).head().build(), callback)
 
     /** GET with progress tracking; see [Requester.progress] for how [progress] must be built. */
+    @Suppress("DEPRECATION")
     fun download(url: String, progress: MutableSharedFlow<Progress>, callback: Callback): Call {
         val request = Request.Builder().url(url).get().build()
         return enqueue(request, callback, CallOptions(progress = progress))
     }
 
     /** Multipart file upload. [fileNames] are form-data field names matching [files] by index. */
+    @Suppress("DEPRECATION")
     fun upload(
         url: String,
         files: List<File>,
@@ -395,6 +404,7 @@ class ApifierClient internal constructor(
         }
     }
 
+    @Suppress("DEPRECATION")
     private fun enqueue(request: Request, callback: Callback, options: CallOptions = CallOptions()): Call =
         call(request, options).also { it.enqueue(callback) }
 
@@ -404,6 +414,7 @@ class ApifierClient internal constructor(
      * which is later than the consumer callback returns and is what [close] has to reach: the
      * engine stays active for as long as the body is streaming.
      */
+    @Suppress("DEPRECATION")
     private inner class ClientCall(
         private val request: Request,
         private val options: CallOptions
@@ -418,6 +429,10 @@ class ApifierClient internal constructor(
 
         override fun request(): Request = request
 
+        @Deprecated(
+            "Launch the suspend fun send() on a coroutine of your own instead of a Callback. " +
+                "Will be removed in 4.0."
+        )
         @OptIn(DelicateCoroutinesApi::class)
         override fun enqueue(callback: Callback) {
             begin()
@@ -426,22 +441,38 @@ class ApifierClient internal constructor(
             scope.launch(start = CoroutineStart.ATOMIC) { run(callback) }
         }
 
-        @Deprecated("Blocking bridge over the async path; prefer enqueue.")
+        @Deprecated(
+            "Blocking bridge over the suspend fun send(); call it from a coroutine instead. " +
+                "Will be removed in 4.0."
+        )
         override fun execute(): Response {
             begin()
             if (Looper.getMainLooper().isCurrentThread) {
                 Log.w(TAG, "HTTP request on main thread; this will block the UI and may cause ANR")
             }
-            try {
-                return pipeline.executeBlocking(request, options, state)
+            return try {
+                try {
+                    runBlocking { pipeline.execute(request, options, state) }
+                } catch (e: InterruptedException) {
+                    // The only cancellation signal a blocking caller has; runBlocking has
+                    // already unwound the call by the time this is thrown.
+                    Thread.currentThread().interrupt()
+                    state.cancel()
+                    throw ApifierException.Cancelled()
+                }
             } catch (e: Throwable) {
                 inFlight.remove(state)
                 throw asDeclaredFailure(e)
             }
         }
 
+        @Deprecated("Cancel the coroutine send() runs on instead of this call. Will be removed in 4.0.")
         override fun cancel() = state.cancel()
 
+        @Deprecated(
+            "Cancellation state now belongs to the coroutine send() runs on, not this call. " +
+                "Will be removed in 4.0."
+        )
         override fun isCanceled(): Boolean = state.isCanceled
 
         private fun begin() {

@@ -31,6 +31,7 @@ import java.util.concurrent.atomic.AtomicLong
  * Each call is a single attempt. Retries, cookies and observation are layered above the
  * transport and reach it through [TransportListener].
  */
+@Suppress("DEPRECATION")
 internal class CronetTransport(
     private val engine: CronetEngine,
     private val readTimeoutMs: Long,

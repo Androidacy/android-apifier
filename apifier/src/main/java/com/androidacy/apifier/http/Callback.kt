@@ -18,6 +18,7 @@ package com.androidacy.apifier.http
 import java.io.IOException
 
 /** Receives the outcome of a [Call] started with [Call.enqueue]. */
+@Suppress("DEPRECATION")
 interface Callback {
 
     /**

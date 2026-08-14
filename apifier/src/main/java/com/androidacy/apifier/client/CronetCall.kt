@@ -64,6 +64,7 @@ internal fun interface UrlRequestFactory {
  * arms the next read only after `onResponseStarted` returns, so a consumer that drains the body
  * inside `onResponse` would wait for bytes that cannot arrive until it yields.
  */
+@Suppress("DEPRECATION")
 internal class CronetCall(
     private val request: Request,
     readTimeoutMs: Long,
@@ -107,6 +108,10 @@ internal class CronetCall(
 
     override fun request(): Request = request
 
+    @Deprecated(
+        "Launch the suspend fun send() on a coroutine of your own instead of a Callback. " +
+            "Will be removed in 4.0."
+    )
     override fun enqueue(callback: Callback) {
         check(enqueued.compareAndSet(false, true)) { "Call already enqueued" }
         this.callback = callback
@@ -127,6 +132,7 @@ internal class CronetCall(
         if (canceled.get()) started.cancel()
     }
 
+    @Suppress("DEPRECATION")
     override suspend fun await(): Response = suspendCancellableCoroutine { continuation ->
         continuation.invokeOnCancellation { cancel() }
         enqueue(object : Callback {
@@ -142,7 +148,10 @@ internal class CronetCall(
         })
     }
 
-    @Deprecated("Blocking bridge over the async path; prefer enqueue.")
+    @Deprecated(
+        "Blocking bridge over the suspend fun send(); call it from a coroutine instead. " +
+            "Will be removed in 4.0."
+    )
     override fun execute(): Response = runBlocking { await() }
 
     override fun cancel() {
@@ -153,6 +162,10 @@ internal class CronetCall(
         deliverFailure(cancellation)
     }
 
+    @Deprecated(
+        "Cancellation state now belongs to the coroutine send() runs on, not this call. " +
+            "Will be removed in 4.0."
+    )
     override fun isCanceled(): Boolean = canceled.get()
 
     private fun deliverResponse(response: Response) {
