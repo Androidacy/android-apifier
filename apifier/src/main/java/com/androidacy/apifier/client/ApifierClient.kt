@@ -16,6 +16,11 @@
 package com.androidacy.apifier.client
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import com.androidacy.apifier.dns.ProtectedDomainCheck
+import com.androidacy.apifier.dns.TrustStatus
+import com.androidacy.apifier.http.ApifierException
 import com.androidacy.apifier.http.Call
 import com.androidacy.apifier.http.Callback
 import com.androidacy.apifier.http.MediaType.Companion.toMediaTypeOrNull
@@ -23,8 +28,23 @@ import com.androidacy.apifier.http.MultipartBody
 import com.androidacy.apifier.http.Request
 import com.androidacy.apifier.http.RequestBody.Companion.asRequestBody
 import com.androidacy.apifier.http.RequestBody.Companion.toRequestBody
+import com.androidacy.apifier.http.Response
+import com.androidacy.apifier.observe.Observation
+import com.androidacy.apifier.observe.RequestObserver
 import com.androidacy.apifier.progress.ProgressListener
+import com.androidacy.apifier.security.PublicSuffixList
+import com.androidacy.apifier.security.SecureCookieJar
+import org.chromium.net.CronetEngine
+import java.io.Closeable
 import java.io.File
+import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Tag marker to skip automatic retries on a per-request basis. */
 object NoRetry
@@ -33,31 +53,179 @@ object NoRetry
 fun Request.Builder.noRetry(): Request.Builder = tag(NoRetry::class.java, NoRetry)
 
 /**
+ * The engine side of the client as one unit: the calls it starts, the labels it reports, and the
+ * teardown [ApifierClient.close] orders its other steps against. An interface because neither
+ * [CronetTransport] nor `CronetEngine` can be substituted in a test.
+ */
+internal interface ClientEngine : AttemptTransport {
+
+    /** Label for the engine serving these calls, reported with every observation event. */
+    val provider: String
+
+    val providerReport: Map<String, String>
+
+    /** Stops the engine and the pool its callbacks run on. In-flight calls are already cancelled. */
+    fun shutdown()
+}
+
+internal class CronetClientEngine(
+    private val engine: CronetEngine,
+    override val providerReport: Map<String, String>,
+    readTimeoutMs: Long
+) : ClientEngine {
+
+    private val transport = CronetTransport(engine, readTimeoutMs)
+
+    override val provider: String = transport.provider
+
+    override fun newCall(request: Request, listener: TransportListener?): Call =
+        transport.newCall(request, listener)
+
+    /**
+     * The engine goes first: a request still winding down reaches its terminal state on the
+     * callback pool, so stopping that pool first would strand it and leave the engine refusing
+     * to shut down for as long as it stayed active.
+     */
+    override fun shutdown() {
+        val deadline = System.currentTimeMillis() + ENGINE_SHUTDOWN_WAIT_MS
+        while (true) {
+            // Cronet answers an active request with IllegalStateException. A straggler is worth
+            // a short wait and never worth throwing out of close().
+            if (runCatching { engine.shutdown() }.isSuccess) break
+            if (System.currentTimeMillis() >= deadline) break
+            try {
+                Thread.sleep(ENGINE_SHUTDOWN_POLL_MS)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                break
+            }
+        }
+        transport.shutdown()
+    }
+
+    companion object {
+        private const val ENGINE_SHUTDOWN_WAIT_MS = 2_000L
+        private const val ENGINE_SHUTDOWN_POLL_MS = 25L
+
+        /** Runs the provider ladder, which blocks and belongs off the main thread. */
+        fun build(context: Context, config: NetworkConfig): CronetClientEngine {
+            val builder = HttpClientBuilder(context, config)
+            val engine = builder.build()
+            return CronetClientEngine(
+                engine,
+                builder.providerReport,
+                config.timeouts.read.inWholeMilliseconds
+            )
+        }
+    }
+}
+
+/**
  * HTTP client backed by Cronet.
+ *
+ * Every call runs through one pipeline: call timeout, protected-domain gate, circuit breaker,
+ * retry, headers, cookies, progress. [call] is the entry point and the request-shaped helpers
+ * are sugar over it.
+ *
+ * Construction blocks. Selecting a Cronet provider reaches Google Play services, which can wait
+ * on a Dynamite download, so build the client on a background thread.
+ *
+ * The client owns an engine, its thread pools and, when protected domains are configured, a
+ * network callback. [close] releases all of them and the instance is unusable afterwards.
+ *
  * @param context Android context for Cronet provider initialization
  * @param config network and transport configuration
  */
-class ApifierClient(context: Context, config: NetworkConfig) {
+class ApifierClient internal constructor(
+    context: Context,
+    config: NetworkConfig,
+    private val engine: ClientEngine
+) : Closeable {
 
-    private val httpClientBuilder = HttpClientBuilder(context, config)
+    constructor(context: Context, config: NetworkConfig) :
+        this(context, config, CronetClientEngine.build(context, config))
 
-    /** Transport the helpers enqueue on, and the entry point for hand-built requests. */
-    val transport: CronetTransport =
-        CronetTransport(httpClientBuilder.build(), config.timeouts.read.inWholeMilliseconds)
+    private val appContext = context.applicationContext
 
-    /**
-     * True when DoH resolution succeeded and Cronet host rules were installed. False means the
-     * client degraded to system DNS, most commonly because it was constructed on the main
-     * thread (where the blocking DoH/provider I/O is skipped) or the network was unavailable.
-     */
-    @Suppress("DEPRECATION")
-    val dohActive: Boolean get() = httpClientBuilder.dohActive
+    private val workers: ExecutorService = Executors.newCachedThreadPool { runnable ->
+        Thread(runnable, "Apifier-Call").apply { isDaemon = true }
+    }
+
+    private val scheduler: ScheduledExecutorService =
+        Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "Apifier-Timeout").apply { isDaemon = true }
+        }
+
+    // DNS probes are blocking and unrelated to any one call, so they get their own thread rather
+    // than occupying a worker that a call is waiting for.
+    private val trustExecutor: ExecutorService? =
+        if (config.protectedDomains.isEmpty()) {
+            null
+        } else {
+            Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "Apifier-Trust").apply { isDaemon = true }
+            }
+        }
+
+    private val trustCheck: ProtectedDomainCheck? = trustExecutor?.let { executor ->
+        ProtectedDomainCheck.production(appContext, config.protectedDomains, executor).apply {
+            setEnforceProtectedDomains(config.enforceProtectedDomains)
+            start()
+        }
+    }
+
+    private val connectivity = appContext.getSystemService(ConnectivityManager::class.java)
+
+    private val networkCallback: ConnectivityManager.NetworkCallback? =
+        trustCheck?.let { check ->
+            connectivity?.let { manager ->
+                object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) = check.onNetworkChanged()
+                }.also(manager::registerDefaultNetworkCallback)
+            }
+        }
+
+    private val observation = Observation()
+
+    private val pipeline: Pipeline = run {
+        val cookieJar = config.cookieStorage?.let(::SecureCookieJar)
+        Pipeline(
+            engine::newCall,
+            config,
+            cookieJar,
+            if (cookieJar == null) null else PublicSuffixList.load(appContext),
+            trustCheck,
+            BreakerRegistry(config.circuitBreakerConfig),
+            scheduler,
+            engine.provider,
+            observation
+        )
+    }
+
+    private val inFlight = ConcurrentHashMap.newKeySet<ClientCall>()
+
+    private val closed = AtomicBoolean(false)
 
     /**
      * Provider selection outcome in ladder order. Keys are `name:version`, values are the
      * `HttpClientBuilder.PROVIDER_*` statuses.
      */
-    val providerReport: Map<String, String> get() = httpClientBuilder.providerReport
+    val providerReport: Map<String, String> get() = engine.providerReport
+
+    /**
+     * Prepares [request] for execution. The returned [Call] runs the whole pipeline once, on the
+     * client's worker pool for [Call.enqueue] and on the calling thread for [Call.execute].
+     *
+     * A request marked with [noRetry] is limited to one attempt whatever [options] asks for.
+     *
+     * @throws IllegalStateException the client is closed.
+     */
+    fun call(request: Request, options: CallOptions = CallOptions()): Call {
+        check(!closed.get()) { "client is closed" }
+        val effective =
+            if (request.tag(NoRetry::class.java) == null) options else options.copy(maxAttempts = 1)
+        return ClientCall(request, effective)
+    }
 
     /** Enqueues an async GET. Returns the [Call] for cancellation. */
     fun get(url: String, callback: Callback): Call =
@@ -121,10 +289,131 @@ class ApifierClient(context: Context, config: NetworkConfig) {
         return enqueue(requestBuilder.build(), callback)
     }
 
+    /** Registers [observer] for every call this client runs. Events arrive off the network thread. */
+    fun addObserver(observer: RequestObserver) {
+        observation.addObserver(observer)
+    }
+
+    fun removeObserver(observer: RequestObserver) {
+        observation.removeObserver(observer)
+    }
+
+    /**
+     * Turns blocking on or off for the configured protected domains. Verdicts keep computing
+     * either way and stay readable through [protectedDomainStatus].
+     */
+    fun setEnforceProtectedDomains(enforce: Boolean) {
+        trustCheck?.setEnforceProtectedDomains(enforce)
+    }
+
+    /** Latest verdict for [host], or `UNKNOWN` when it is not protected or has no verdict yet. */
+    fun protectedDomainStatus(host: String): TrustStatus =
+        trustCheck?.status(host) ?: TrustStatus.UNKNOWN
+
+    /**
+     * Releases the engine, the pools and the network callback. Idempotent, and safe to call from
+     * any thread other than one running a callback from this client.
+     *
+     * In-flight calls are cancelled and awaited first, because the engine refuses to shut down
+     * while a request is active. Observation stops last so events from those cancellations are
+     * delivered before this returns.
+     */
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+
+        networkCallback?.let { callback ->
+            runCatching { connectivity?.unregisterNetworkCallback(callback) }
+        }
+        inFlight.forEach { it.cancel() }
+        // Ahead of the drain, since this releases a call parked on a verdict that is never
+        // coming; waiting for it would spend the whole trust budget inside close.
+        trustCheck?.shutdown()
+        trustExecutor?.shutdownNow()
+        drainCalls()
+        // A response body the consumer never closed still holds its call-budget task, so an
+        // orderly shutdown here would wait out the whole budget for nothing.
+        scheduler.shutdownNow()
+        engine.shutdown()
+        observation.close()
+    }
+
+    private fun drainCalls() {
+        workers.shutdown()
+        val deadline = System.currentTimeMillis() + DRAIN_TIMEOUT_MS
+        try {
+            // Polling rather than awaitTermination alone: a call running on a caller's thread
+            // through execute() is in flight without occupying a worker.
+            while (inFlight.isNotEmpty() && System.currentTimeMillis() < deadline) {
+                Thread.sleep(DRAIN_POLL_MS)
+            }
+            val remaining = (deadline - System.currentTimeMillis()).coerceAtLeast(0)
+            if (!workers.awaitTermination(remaining, TimeUnit.MILLISECONDS)) workers.shutdownNow()
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            workers.shutdownNow()
+        }
+    }
+
     private fun enqueue(request: Request, callback: Callback): Call =
-        transport.newCall(request).also { it.enqueue(callback) }
+        call(request).also { it.enqueue(callback) }
+
+    /** One logical call: a pipeline run the client can cancel and account for while it is in flight. */
+    private inner class ClientCall(
+        private val request: Request,
+        private val options: CallOptions
+    ) : Call {
+
+        private val state = PipelineCall()
+        private val started = AtomicBoolean(false)
+
+        override fun request(): Request = request
+
+        override fun enqueue(callback: Callback) {
+            check(started.compareAndSet(false, true)) { "Call already enqueued" }
+            inFlight.add(this)
+            try {
+                workers.execute { run(callback) }
+            } catch (e: RejectedExecutionException) {
+                inFlight.remove(this)
+                callback.onFailure(this, ApifierException.Cancelled())
+            }
+        }
+
+        @Deprecated("Blocking bridge over the async path; prefer enqueue.")
+        override fun execute(): Response {
+            check(started.compareAndSet(false, true)) { "Call already enqueued" }
+            inFlight.add(this)
+            try {
+                return pipeline.execute(request, options, state)
+            } finally {
+                inFlight.remove(this)
+            }
+        }
+
+        override fun cancel() = state.cancel()
+
+        override fun isCanceled(): Boolean = state.isCanceled
+
+        private fun run(callback: Callback) {
+            try {
+                callback.onResponse(this, pipeline.execute(request, options, state))
+            } catch (e: IOException) {
+                callback.onFailure(this, e)
+            } catch (e: Throwable) {
+                // The consumer is owed exactly one terminal callback. An interrupt during a
+                // shutdown, or any other non-IO failure, must not leave it waiting forever.
+                if (e is InterruptedException) Thread.currentThread().interrupt()
+                callback.onFailure(this, IOException(e))
+            } finally {
+                inFlight.remove(this)
+            }
+        }
+    }
 
     companion object {
+        private const val DRAIN_TIMEOUT_MS = 5_000L
+        private const val DRAIN_POLL_MS = 10L
+
         operator fun invoke(context: Context, block: NetworkConfigBuilder.() -> Unit): ApifierClient {
             val config = NetworkConfigBuilder().apply(block).build()
             return ApifierClient(context, config)

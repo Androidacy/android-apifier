@@ -31,6 +31,13 @@ data class NetworkConfig(
     val cookieStorage: CookieStorage? = null,
     val headers: Map<String, String> = emptyMap(),
     val dynamicHeaders: Map<String, () -> String> = emptyMap(),
+    /**
+     * Hosts whose system DNS answers are compared against known-good public resolvers before a
+     * call to them runs. Empty switches the check off entirely.
+     */
+    val protectedDomains: List<String> = emptyList(),
+    /** Whether a failed comparison refuses the call. Verdicts are computed either way. */
+    val enforceProtectedDomains: Boolean = true,
     /** Registers an internal `Log.d`-per-event observer. Advisory only; release logcat is stripped. */
     val logRequests: Boolean = false
 )
@@ -160,7 +167,14 @@ class NetworkConfigBuilder {
     private var cookieStorage: CookieStorage? = null
     private val headers = mutableMapOf<String, String>()
     private val dynamicHeaders = mutableMapOf<String, () -> String>()
+    private val protectedDomains = mutableListOf<String>()
+    var enforceProtectedDomains: Boolean = true
     var logRequests: Boolean = false
+
+    /** Hosts to compare against known-good resolvers before calling them. */
+    fun protectedDomains(vararg domains: String) {
+        protectedDomains.addAll(domains)
+    }
 
     fun cronet(block: CronetConfigBuilder.() -> Unit) {
         cronetConfig = CronetConfigBuilder().apply(block).build()
@@ -196,7 +210,8 @@ class NetworkConfigBuilder {
 
     fun build() = NetworkConfig(
         cronetConfig, timeouts, connectionPool, retryConfig, circuitBreakerConfig,
-        cookieStorage, headers, dynamicHeaders, logRequests
+        cookieStorage, headers, dynamicHeaders, protectedDomains.toList(),
+        enforceProtectedDomains, logRequests
     )
 }
 
