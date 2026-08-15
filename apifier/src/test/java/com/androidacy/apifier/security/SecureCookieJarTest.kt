@@ -389,6 +389,60 @@ class SecureCookieJarTest {
     }
 
     @Test
+    fun aDomainWithAnUnreadableEntryIsNotPrunedWhenTheRestExpired() {
+        val past = System.currentTimeMillis() - 60_000L
+        val expired = encodeWithJarKey(cookie("a", "A", domain = "example.com", expiresAt = past))
+        storage.putStringSet("cookies_example.com", setOf(expired, "unreadable-under-this-key"))
+        storage.putStringSet("_cookie_domains", setOf("example.com"))
+
+        jar.loadForRequest(url("https://example.com/"))
+
+        assertEquals(
+            setOf(expired, "unreadable-under-this-key"),
+            storage.getStringSet("cookies_example.com", null),
+        )
+        assertTrue(storage.getStringSet("_cookie_domains", null).orEmpty().contains("example.com"))
+    }
+
+    @Test
+    fun aTotalEncryptionFailureLeavesEveryStoredCookieInPlace() {
+        val future = System.currentTimeMillis() + 60_000L
+        val target = url("https://example.com/")
+        jar.saveFromResponse(target, listOf(cookie("a", "A", domain = "example.com", expiresAt = future)))
+        val before = storage.getStringSet("cookies_example.com", null)
+        assertEquals(1, before?.size)
+
+        FailingEncryptCipher.withEncryptionFailingAfter(0) {
+            jar.saveFromResponse(target, listOf(cookie("b", "B", domain = "example.com", expiresAt = future)))
+        }
+
+        assertEquals(before, storage.getStringSet("cookies_example.com", null))
+        assertTrue(storage.getStringSet("_cookie_domains", null).orEmpty().contains("example.com"))
+    }
+
+    @Test
+    fun aPartialEncryptionFailureLeavesEveryStoredCookieInPlace() {
+        val future = System.currentTimeMillis() + 60_000L
+        val target = url("https://example.com/")
+        jar.saveFromResponse(
+            target,
+            listOf(
+                cookie("a", "A", domain = "example.com", expiresAt = future),
+                cookie("b", "B", domain = "example.com", path = "/b", expiresAt = future),
+            ),
+        )
+        val before = storage.getStringSet("cookies_example.com", null)
+        assertEquals(2, before?.size)
+
+        // One of the three persistent cookies encrypts, the rest do not.
+        FailingEncryptCipher.withEncryptionFailingAfter(1) {
+            jar.saveFromResponse(target, listOf(cookie("c", "C", domain = "example.com", path = "/c", expiresAt = future)))
+        }
+
+        assertEquals(before, storage.getStringSet("cookies_example.com", null))
+    }
+
+    @Test
     fun theDecodedCacheIsBoundedAndEvictsEldest() {
         val future = System.currentTimeMillis() + 60_000L
         val counting = CountingCookieStorage(InMemoryCookieStorage())

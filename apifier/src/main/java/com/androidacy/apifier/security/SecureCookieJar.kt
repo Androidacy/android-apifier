@@ -108,16 +108,25 @@ class SecureCookieJar(
             decodedCache.put(domain, validCookies)
 
             val persistentCookies = validCookies.filter { it.persistent }
-            val encoded = persistentCookies.mapNotNull { encode(it) }.toSet()
+            val encoded = persistentCookies.mapNotNull { encode(it) }
 
-            if (encoded.isNotEmpty()) {
-                storage.putStringSet(domainKey(domain), encoded)
-                addedDomains.add(domain)
-                removedDomains.remove(domain)
-            } else if (!rawEntries.isNullOrEmpty() && stored.isNotEmpty()) {
-                storage.remove(domainKey(domain))
-                removedDomains.add(domain)
-                addedDomains.remove(domain)
+            // A cipher failure must never shrink or delete what is already persisted. Storage is
+            // rewritten only when every raw entry decoded and every persistent cookie re-encrypted,
+            // so a Keystore that reads but cannot write loses the incoming cookie, not the saved
+            // ones. Dropping an expired cookie still goes through, since that is a complete pass.
+            val accountedFor = stored.size == (rawEntries?.size ?: 0) &&
+                encoded.size == persistentCookies.size
+
+            if (accountedFor) {
+                if (encoded.isNotEmpty()) {
+                    storage.putStringSet(domainKey(domain), encoded.toSet())
+                    addedDomains.add(domain)
+                    removedDomains.remove(domain)
+                } else if (!rawEntries.isNullOrEmpty()) {
+                    storage.remove(domainKey(domain))
+                    removedDomains.add(domain)
+                    addedDomains.remove(domain)
+                }
             }
             if (validCookies.isEmpty()) decodedCache.remove(domain)
         }
@@ -146,15 +155,17 @@ class SecureCookieJar(
     }
 
     /**
-     * Deletes [domain] from storage, the index and the cache only when its raw entries decode to
-     * at least one cookie and every decoded cookie is expired. Reads [domain] fresh instead of
-     * trusting the caller's earlier scan.
+     * Deletes [domain] from storage, the index and the cache only when every raw entry decoded and
+     * every decoded cookie is expired. Reads [domain] fresh instead of trusting the caller's
+     * earlier scan.
      */
     private fun pruneIfStillExpired(domain: String, now: Long) {
         val rawCount = storage.getStringSet(domainKey(domain), null)?.size ?: 0
         val decoded = decodedCache.get(domain) ?: loadDomain(domain)
         if (decoded.any { it.expiresAt > now }) return
-        if (rawCount > 0 && decoded.isEmpty()) return
+        // An entry that failed to decrypt may still hold a live cookie, so nothing is deleted
+        // until every raw entry is accounted for. Storage holds persistent cookies only.
+        if (decoded.count { it.persistent } < rawCount) return
 
         decodedCache.remove(domain)
         if (rawCount > 0) storage.remove(domainKey(domain))
