@@ -25,6 +25,7 @@ import com.androidacy.apifier.dns.ResolverTrust
 import com.androidacy.apifier.http.ApifierException
 import com.androidacy.apifier.http.Call
 import com.androidacy.apifier.http.Callback
+import com.androidacy.apifier.http.Headers
 import com.androidacy.apifier.http.MediaType.Companion.toMediaTypeOrNull
 import com.androidacy.apifier.http.MultipartBody
 import com.androidacy.apifier.http.Request
@@ -212,6 +213,9 @@ class ApifierClient internal constructor(
     @Suppress("DEPRECATION")
     override fun observe(observer: RequestObserver): Requester =
         DerivedRequester(this, CallOptions(observer = observer))
+
+    override fun header(name: String, value: String): Requester =
+        DerivedRequester(this, CallOptions(headers = Headers.Builder().set(name, value).build()))
 
     /**
      * The call every [Requester] on this client ends up in. The call counts as in flight until
@@ -546,13 +550,10 @@ class ApifierClient internal constructor(
 /**
  * A view of [client] carrying one call's [options]. Engine, pipeline, cookie jar, breakers and
  * scope stay the client's, so a view is cheap enough to build for one call.
- *
- * Internal rather than private: the [Requester.header] extension derives a new view directly,
- * the same way the modifiers below do.
  */
-internal class DerivedRequester(
-    internal val client: ApifierClient,
-    internal val options: CallOptions
+private class DerivedRequester(
+    private val client: ApifierClient,
+    private val options: CallOptions
 ) : Requester {
 
     override suspend fun send(request: Request): Response = client.send(request, options)
@@ -568,6 +569,9 @@ internal class DerivedRequester(
     @Suppress("DEPRECATION")
     override fun observe(observer: RequestObserver): Requester =
         derive(options.copy(observer = observer))
+
+    override fun header(name: String, value: String): Requester =
+        derive(options.copy(headers = options.headers.newBuilder().set(name, value).build()))
 
     private fun derive(options: CallOptions) = DerivedRequester(client, options)
 }
