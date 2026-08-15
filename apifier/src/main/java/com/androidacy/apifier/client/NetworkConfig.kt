@@ -66,7 +66,7 @@ data class CronetConfig(
     }
 }
 
-/** Timeout durations, each enforced by the pipeline rather than the transport itself. */
+/** Timeout durations, each enforced by the pipeline; the transport enforces neither. */
 data class TimeoutConfig(
     /** Longest gap between body chunks once the response headers arrive; enforced on the body pipe. */
     val read: Duration = 60.seconds,

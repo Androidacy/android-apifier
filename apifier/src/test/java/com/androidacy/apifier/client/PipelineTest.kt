@@ -381,13 +381,11 @@ class PipelineTest {
     }
 
     /**
-     * gateTrust reads `now` again and subtracts it from the deadline, which cancels out any
-     * overflow from the addition under a monotonic clock; the saturation is only observable at
-     * the deadline value itself, which an absolute expiry check (unlike gateTrust's subtraction)
-     * would depend on directly.
+     * gateTrust subtracts a freshly read `now` from the deadline, and that subtraction cancels any
+     * overflow from the addition, so the saturation is observable only at the deadline value itself.
      */
     @Test
-    fun anEffectivelyUnboundedCallBudgetStillWaitsForTheTrustVerdict() {
+    fun anOverflowingCallBudgetClampsInsteadOfWrappingNegative() {
         val now = System.currentTimeMillis()
 
         val deadlineAt = saturatingDeadline(now, Long.MAX_VALUE)
