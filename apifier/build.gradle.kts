@@ -46,12 +46,6 @@ android {
 
     testOptions {
         unitTests.isIncludeAndroidResources = true
-        // Robolectric installs Conscrypt as a JVM-wide security provider, which then serves
-        // SSLContext.getInstance("TLS") for every later test class in the same JVM. Its
-        // server-side handshake needs reflective access into java.net that this JDK denies,
-        // so TrustedResolverTest's local TLS servers would fail depending on class order.
-        // One JVM per class keeps that leak contained.
-        unitTests.all { it.setForkEvery(1) }
     }
 }
 

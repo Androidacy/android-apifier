@@ -15,7 +15,7 @@ HTTP and API networking library for Android, built directly on Cronet.
 - **Typed errors**: failures surface as `ApifierException` subtypes instead of a generic `IOException`
 - **Request observation**: `ApifierClient.events` is a `SharedFlow<RequestEvent>` carrying outcome,
   timing and byte counts for every attempt; a per-call `observe()` view sees only that call's event
-- **Resolver qualification**: continuously checks whether the platform's DNS resolver is answering honestly, independent of any host the app calls; optionally refuses calls while it is not, and per-host IP pins for hosts where you know the expected addresses
+- **Resolver qualification**: checks whether the platform's DNS resolver is answering honestly, independent of any host the app calls, and rechecks after every network change; optionally refuses calls while it is not, and per-host IP pins for hosts where you know the expected addresses
 - **Encrypted cookies**: public-suffix-scoped cookie jar backed by a pluggable store, AES-GCM
   encrypted with an Android Keystore key (StrongBox or TEE where the device has one). A device
   with no usable Keystore drops cookies instead of writing them in cleartext
@@ -119,13 +119,14 @@ val response = client.maxAttempts(1).observe { report(it) }.get("https://api.exa
 
 ## Resolver Qualification
 
-Every client continuously probes the platform's DNS resolver: names that must not resolve, and
-public names that must resolve to public address space. A resolver that cannot answer both
-consistently is untrustworthy, and the check runs the same way regardless of which host the app is
-about to call. This detects a resolver that is broadly lying or hijacked; it does not detect a
-single hostname being redirected while the rest of DNS behaves normally, and it makes no attempt to
-authenticate any one host's answer against a third-party DNS provider, since a geo-DNS fronted host
-can see different, equally legitimate answers from different resolvers.
+Each client qualifies the platform's DNS resolver once and caches the verdict until the network
+changes: names that must not resolve, and public names that must resolve to public address space.
+A resolver that cannot answer both consistently is untrustworthy, and the check runs the same way
+regardless of which host the app is about to call. This detects a resolver that is broadly lying or
+hijacked; it does not detect a single hostname being redirected while the rest of DNS behaves
+normally, and it makes no attempt to authenticate any one host's answer against a third-party DNS
+provider, since a geo-DNS fronted host can see different, equally legitimate answers from different
+resolvers.
 
 ```kotlin
 val trustworthy = client.isResolverTrustworthy()
@@ -223,42 +224,6 @@ library does not override them:
 
 Cookies are stored encrypted with a hardware-backed AES-GCM key when a `CookieStorage`
 backend is configured.
-
-## Migrating to 3.0.0
-
-- `send()` (and `get`/`post`/`delete`/`head`/`download`/`upload`) is the call surface now: a
-  `suspend fun` on `Requester` that returns the `Response` directly, in place of `enqueue`/`execute`.
-- `Call`, `Call.enqueue`, `Call.execute`, `Call.cancel`, `Call.isCanceled` and `Call.Factory` are
-  deprecated; they still work but are removed in 4.0. `Callback` itself is not deprecated, since
-  `Call.enqueue` still needs somewhere to report to until it is gone.
-- If you keep using callbacks in the meantime: callbacks run on the client's worker pool, and the
-  body handed to `onResponse` is still streaming when the callback fires. Post to your own handler
-  before touching the UI, read or close the body, and do not treat the callback returning as the
-  end of the call: the client stays active until the body ends.
-- `ProgressListener` and `ProgressDirection` are gone. `progress(sink)` on `Requester` (or
-  `download`/`upload`'s `progress` parameter on the deprecated callback surface) takes a
-  `MutableSharedFlow<Progress>`, built with `extraBufferCapacity > 0`; see
-  [Progress Tracking](#progress-tracking). `Progress` carries no direction, since a call's upload
-  and download phases never interleave.
-- `addObserver`/`removeObserver` are deprecated in favour of `ApifierClient.events`, a
-  `SharedFlow<RequestEvent>`; see [Observation](#observation).
-- `ResponseBody.source()` and `byteStream()` are deprecated in favour of the suspend
-  `ResponseBody.bytes()`/`string()`, which read the whole body on `Dispatchers.IO` instead of
-  blocking the calling thread.
-- `NoRetry` and `Request.Builder.noRetry()` are gone; `maxAttempts(1)`, the default, replaces them.
-- `retry { maxAttempts }` and `timeouts { call }` are gone from the DSL; the top-level
-  `NetworkConfigBuilder.maxAttempts(count)`/`timeout(duration)` replace them, and are also the
-  per-call modifiers on `Requester`.
-- Failures arrive as `ApifierException` subtypes. Code matching on the old flat
-  `IOException("Cronet request failed")` message needs to switch on `errorCode` instead.
-- `ApifierClient` is `Closeable` and owns an engine, thread pools and a network callback. Call
-  `close()` when you are done with it.
-- DoH resolution and the OkHttp interceptor are gone. Configure TLS trust through your app's
-  Network Security Configuration.
-- The DSL entry, status query and enforcement toggle for the old per-host DNS comparison are gone.
-  `ensureTrustworthyResolver(true)` and `isResolverTrustworthy()` replace them with
-  host-independent resolver qualification, and `hostIpPins { ... }` covers a host whose expected
-  addresses you already know; see [Resolver Qualification](#resolver-qualification).
 
 ## Requirements
 
