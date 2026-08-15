@@ -376,6 +376,19 @@ class SecureCookieJarTest {
     }
 
     @Test
+    fun aJarWithNoUsableKeyLeavesStoredCiphertextIntactAfterASave() {
+        val keylessJar = SecureCookieJar(storage, psl)
+        storage.putStringSet("cookies_example.com", setOf("undecryptable-without-a-key"))
+        storage.putStringSet("_cookie_domains", setOf("example.com"))
+
+        val incoming = cookie("other", "B", domain = "example.com", expiresAt = Long.MAX_VALUE, persistent = false)
+        keylessJar.saveFromResponse(url("https://example.com/"), listOf(incoming))
+
+        assertEquals(setOf("undecryptable-without-a-key"), storage.getStringSet("cookies_example.com", null))
+        assertTrue(storage.getStringSet("_cookie_domains", null).orEmpty().contains("example.com"))
+    }
+
+    @Test
     fun theDecodedCacheIsBoundedAndEvictsEldest() {
         val future = System.currentTimeMillis() + 60_000L
         val counting = CountingCookieStorage(InMemoryCookieStorage())

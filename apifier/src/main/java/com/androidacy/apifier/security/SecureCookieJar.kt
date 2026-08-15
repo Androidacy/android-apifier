@@ -52,12 +52,9 @@ class SecureCookieJar(
     // binder IPC each.
     private val decodedCache = DecodedDomainCache()
 
-    // saveFromResponse and pruning need atomicity against each other and against loadForRequest's
-    // scan: a scan that fills decodedCache from a stale storage read must not race a save putting
-    // a fresher entry, or the save's cookie (a session cookie most of all -- it exists nowhere
-    // else) is lost under the scan's overwrite. loadForRequest's scan therefore takes the shared
-    // read side; narrowing which domains it visits keeps that section short even though it is no
-    // longer lock-free.
+    // Guards decodedCache and storage against a save and a load scan filling the same domain
+    // concurrently. loadForRequest's scan takes the shared read side; saveFromResponse and
+    // pruning take the exclusive write side.
     private val lock = ReentrantReadWriteLock()
 
     override fun loadForRequest(uri: Uri): List<Cookie> {
@@ -116,9 +113,7 @@ class SecureCookieJar(
                 storage.putStringSet(domainKey(domain), encoded)
                 addedDomains.add(domain)
                 removedDomains.remove(domain)
-            } else if (rawEntries != null) {
-                // Nothing to remove when this domain never had a stored entry -- an
-                // all-session response would otherwise manufacture an empty index write.
+            } else if (!rawEntries.isNullOrEmpty() && stored.isNotEmpty()) {
                 storage.remove(domainKey(domain))
                 removedDomains.add(domain)
                 addedDomains.remove(domain)
@@ -150,13 +145,9 @@ class SecureCookieJar(
     }
 
     /**
-     * Removes [domain] from storage, the index and the cache -- but only when its raw entries
-     * actually decoded to something and every one of them is expired. A raw entry that exists but
-     * fails to decode (no usable [secretKey], corrupted ciphertext) is a read failure, not expiry,
-     * and must not be deleted: `pruneIfStillExpired` here would otherwise convert a transient
-     * Keystore outage into permanent loss of the caller's cookies. The freshness re-check guards a
-     * second race: a concurrent [saveFromResponse] could have refreshed [domain] between
-     * [loadForRequest]'s read-locked scan and this write-locked call.
+     * Deletes [domain] from storage, the index and the cache only when its raw entries decode to
+     * at least one cookie and every decoded cookie is expired. Reads [domain] fresh rather than
+     * trusting the caller's earlier scan.
      */
     private fun pruneIfStillExpired(domain: String, now: Long) {
         val rawCount = storage.getStringSet(domainKey(domain), null)?.size ?: 0
