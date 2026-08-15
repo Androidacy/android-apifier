@@ -58,8 +58,9 @@ class HttpClientBuilderTest {
         val builder = buildWith(fallback, appPackaged)
 
         assertEquals("IN_USE", builder.providerReport["App-Packaged-Cronet-Provider:1.0"])
-        // the ladder stops at the first eligible match, so the lower-priority fallback rung is never recorded
-        assertFalse(builder.providerReport.containsKey(CronetProvider.PROVIDER_NAME_FALLBACK))
+        // a versioned key here means selection fell through to the fallback rung after
+        // already matching app-packaged, which the bare-name form above would miss
+        assertFalse(builder.providerReport.containsKey("${CronetProvider.PROVIDER_NAME_FALLBACK}:1.0"))
     }
 
     @Test

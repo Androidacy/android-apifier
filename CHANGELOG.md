@@ -75,6 +75,10 @@
   host-independent resolver qualification, and `hostIpPins { ... }` covers a host whose expected
   addresses you already know; see the README's
   [Resolver Qualification](README.md#resolver-qualification) section.
+- `AddressClassifier.classify` no longer classifies a zone-suffixed address (`fe80::1%wlan0`) or an
+  IPv4-mapped address (`::ffff:1.2.3.4`); both now return `INVALID`. Strip the zone suffix, or
+  unwrap the mapped address to its IPv4 form, before calling `classify` if you need an answer for
+  either shape.
 
 ### Redirects
 

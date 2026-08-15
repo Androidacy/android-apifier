@@ -28,6 +28,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import java.io.BufferedReader
+import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
 import java.io.InputStreamReader
@@ -164,9 +165,14 @@ class CronetTransportContentTypeTest {
         flush()
     }
 
+    private fun keytoolPath(): String {
+        val fromJavaHome = File(System.getProperty("java.home"), "bin/keytool")
+        return if (fromJavaHome.exists()) fromJavaHome.absolutePath else "keytool"
+    }
+
     private fun generateSelfSignedKeystore(path: String) {
         val process = ProcessBuilder(
-            "keytool", "-genkeypair",
+            keytoolPath(), "-genkeypair",
             "-alias", "test",
             "-keyalg", "RSA",
             "-keysize", "2048",
