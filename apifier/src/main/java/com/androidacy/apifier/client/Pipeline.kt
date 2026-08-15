@@ -44,6 +44,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okio.Buffer
 import okio.BufferedSource
 import okio.ForwardingSource
@@ -256,7 +257,9 @@ internal class Pipeline(
      * below to run too.
      */
     private suspend fun gateResolver(host: String, deadlineAt: Long) {
-        if (config.hostIpPins.containsKey(host.lowercase()) && HostIpPins.refuses(config.hostIpPins, host, resolveAddresses(host))) {
+        if (config.hostIpPins.containsKey(host.lowercase()) &&
+            HostIpPins.refuses(config.hostIpPins, host, resolveAddresses(host, verdictBudget(deadlineAt)))
+        ) {
             throw ApifierException.DnsUntrusted(host)
         }
         if (!config.ensureTrustworthyResolver && config.hostIpPins.isEmpty()) return
@@ -268,14 +271,21 @@ internal class Pipeline(
         }
     }
 
-    /** A resolution failure leaves the pin with nothing to match, which refuses like any other mismatch. */
-    private suspend fun resolveAddresses(host: String): List<String> = withContext(Dispatchers.IO) {
-        try {
-            InetAddress.getAllByName(host).mapNotNull { it.hostAddress }
-        } catch (e: UnknownHostException) {
-            emptyList()
-        }
-    }
+    /**
+     * A resolution failure leaves the pin with nothing to match, which refuses like any other
+     * mismatch. A resolver that never answers reaches the same place once [budgetMs] runs out; the
+     * platform lookup has no timeout of its own, so without this the call could outlive its budget.
+     */
+    private suspend fun resolveAddresses(host: String, budgetMs: Long): List<String> =
+        withTimeoutOrNull(budgetMs) {
+            withContext(Dispatchers.IO) {
+                try {
+                    InetAddress.getAllByName(host).mapNotNull { it.hostAddress }
+                } catch (e: UnknownHostException) {
+                    emptyList()
+                }
+            }
+        } ?: emptyList()
 
     // An effectively unbounded call budget leaves deadlineAt at Long.MAX_VALUE, and handing that
     // whole span on would wrap the wait's own deadline negative.
