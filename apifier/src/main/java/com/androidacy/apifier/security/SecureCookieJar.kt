@@ -146,7 +146,7 @@ class SecureCookieJar(
 
     /**
      * Deletes [domain] from storage, the index and the cache only when its raw entries decode to
-     * at least one cookie and every decoded cookie is expired. Reads [domain] fresh rather than
+     * at least one cookie and every decoded cookie is expired. Reads [domain] fresh instead of
      * trusting the caller's earlier scan.
      */
     private fun pruneIfStillExpired(domain: String, now: Long) {
