@@ -380,8 +380,9 @@ class ApifierClient internal constructor(
      * interrupted out of the drain, and lose the pending events.
      */
     override fun close() {
-        check(!inCallback.get() && !observation.isDispatching) {
-            "close() must not be called from a callback of this client"
+        check(inCallback.get() != true && !observation.isDispatching) {
+            "close() must not be called from a callback or observer of this client; " +
+                "close it from a thread of your own"
         }
         if (!closed.compareAndSet(false, true)) return
 
