@@ -27,8 +27,7 @@
 - `ProgressListener` and `ProgressDirection` are gone. `progress(sink)` on `Requester` (or
   `download`/`upload`'s `progress` parameter on the deprecated callback surface) takes a
   `MutableSharedFlow<Progress>`, built with `extraBufferCapacity > 0`; see the README's
-  [Progress Tracking](README.md#progress-tracking) section. `Progress` carries no direction, since
-  a call's upload and download phases never interleave.
+  [Progress Tracking](README.md#progress-tracking) section. `Progress` carries no direction.
 - `addObserver`/`removeObserver` are deprecated in favour of `ApifierClient.events`, a
   `SharedFlow<RequestEvent>`; see the README's [Observation](README.md#observation) section.
 
@@ -46,8 +45,7 @@
   and `ResponseBody.lines()` returns a `Flow<String>` of the body one line at a time. Both close
   the body when they finish. `json` needs `org.jetbrains.kotlinx:kotlinx-serialization-json` and
   `org.jetbrains.kotlinx:kotlinx-serialization-json-okio` on your own classpath: apifier compiles
-  against them but does not bundle them, so a project that never calls `json` is not forced to
-  pull in a serialization library it does not use.
+  against them but does not bundle them.
 - `Requester.header(name, value)` attaches a header to a single call without touching the
   client's own configuration:
   ```kotlin
@@ -57,13 +55,11 @@
   a same-named header configured client-wide.
 - `Response.successOrThrow()` returns the response on a 2xx status and otherwise closes its body
   and throws `ApifierException.HttpError`, which carries the status in its `code` property. Use it
-  in place of a hand-written `if (!response.isSuccessful) ...` check, which is easy to write
-  without closing the body on the failing path.
+  in place of a hand-written `isSuccessful` check.
 - `Response.retryAfter` parses the `Retry-After` header in either form the HTTP spec allows,
   a delta in seconds or an HTTP-date, and returns the remaining `kotlin.time.Duration`. A date
   already in the past, or a negative delta a malformed server sent, both come back as
-  `Duration.ZERO` rather than a negative duration; the header returns `null` when it is missing
-  or in neither form.
+  `Duration.ZERO`. The header returns `null` when it is missing or in neither form.
 
 ### DNS trust
 
