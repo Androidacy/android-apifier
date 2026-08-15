@@ -94,9 +94,9 @@ data class TimeoutConfig(
 /**
  * Per-host circuit breaker. After [failureThreshold] consecutive failed calls to a host,
  * calls to it fail immediately with `ApifierException.CircuitOpen` until [resetTimeoutMs] has
- * passed since the most recent failure. A 5xx response or a transport failure counts as a
- * failure, as does a call that burns its entire timeout; a cancel by the caller does not, and
- * any other response counts as a success.
+ * passed since the most recent failure. A 5xx response counts as a failure, as does any call
+ * that ends in an error other than a cancel by the caller. Any other response counts as a
+ * success.
  */
 data class CircuitBreakerConfig(
     val enabled: Boolean = true,
