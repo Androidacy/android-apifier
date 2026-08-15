@@ -475,6 +475,45 @@ class PipelineTest {
         response.close()
     }
 
+    /** Fails if the gate drops its pin consult: a pinned host resolving outside its pins must never reach the transport. */
+    @Test
+    fun aPinnedHostResolvingOutsideItsPinsIsRefusedByTheGate() {
+        val transport = FakeTransport(listOf(step { ok(it) }))
+        val pipeline = pipelineOf(
+            transport,
+            config(hostIpPins = mapOf(PIN_HOST to setOf("203.0.113.10")))
+        )
+
+        val thrown = assertThrows(ApifierException.DnsUntrusted::class.java) {
+            pipeline.executeBlocking(
+                Request.Builder().url("https://$PIN_HOST/resource").build(),
+                CallOptions(),
+                PipelineCall()
+            )
+        }
+
+        assertEquals(PIN_HOST, thrown.host)
+        assertEquals(0, transport.seen.size)
+    }
+
+    /** Fails if enforcement goes back to depending on the flag once a pin exists anywhere on the client. */
+    @Test
+    fun pinsForceEnforcementEvenWithTheFlagOff() {
+        val transport = FakeTransport(listOf(step { ok(it) }))
+        val pipeline = pipelineOf(
+            transport,
+            config(enforceResolver = false, hostIpPins = mapOf("other.example.com" to setOf(PUBLIC_ADDRESS))),
+            qualification = untrustedQualification()
+        )
+
+        val thrown = assertThrows(ApifierException.DnsUntrusted::class.java) {
+            pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall())
+        }
+
+        assertEquals(HOST, thrown.host)
+        assertEquals(0, transport.seen.size)
+    }
+
     /** Fails if the verdict wait parks its thread instead of suspending. */
     @Test
     fun trustWaitDoesNotBlockTheCallingThread() {
@@ -937,12 +976,14 @@ class PipelineTest {
         headers: Map<String, String> = emptyMap(),
         dynamicHeaders: Map<String, () -> String> = emptyMap(),
         retry: RetryConfig = RetryConfig(),
-        enforceResolver: Boolean = false
+        enforceResolver: Boolean = false,
+        hostIpPins: Map<String, Set<String>> = emptyMap()
     ) = NetworkConfig(
         headers = headers,
         dynamicHeaders = dynamicHeaders,
         retryConfig = retry,
-        ensureTrustworthyResolver = enforceResolver
+        ensureTrustworthyResolver = enforceResolver,
+        hostIpPins = hostIpPins
     )
 
     private fun pipelineOf(
@@ -1141,6 +1182,8 @@ class PipelineTest {
 
     private companion object {
         const val HOST = "api.example.com"
+        // Resolved by the OS locally, so the pin gate needs no real network to run.
+        const val PIN_HOST = "localhost"
         const val CANARY = "canary.example.org"
         const val INVALID_SUFFIX = ".invalid"
         const val PUBLIC_ADDRESS = "93.184.216.34"
