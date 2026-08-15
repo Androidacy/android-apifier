@@ -294,6 +294,40 @@ class PipelineTest {
         assertEquals(1, transport.seen.size)
     }
 
+    /** Fails if the idempotent method set reverts to just GET and HEAD. */
+    @Test
+    fun anIdempotentMethodIsRetriedAfterATransportFailure() {
+        val transport = FakeTransport(listOf(step { throw transportFailure() }, step { ok(it) }))
+        val pipeline = pipelineOf(
+            transport,
+            config(retry = RetryConfig(maxAttempts = 3, retryIdempotentOnly = true))
+        )
+        val put = request().put("x".toRequestBody(null)).build()
+
+        val response = pipeline.executeBlocking(put, CallOptions(), PipelineCall())
+
+        assertEquals(200, response.code)
+        assertEquals(2, transport.seen.size)
+        response.close()
+    }
+
+    /** Fails if the idempotent method set widens past RFC 9110 s9.2.2 to cover POST. */
+    @Test
+    fun aNonIdempotentMethodIsStillNotRetried() {
+        val transport = FakeTransport(listOf(step { throw transportFailure() }, step { ok(it) }))
+        val pipeline = pipelineOf(
+            transport,
+            config(retry = RetryConfig(maxAttempts = 3, retryIdempotentOnly = true))
+        )
+        val post = request().post("x".toRequestBody(null)).build()
+
+        assertThrows(ApifierException.Transport::class.java) {
+            pipeline.executeBlocking(post, CallOptions(), PipelineCall())
+        }
+
+        assertEquals(1, transport.seen.size)
+    }
+
     @Test
     fun nonRetryableExceptionIsTerminal() {
         val transport = FakeTransport(

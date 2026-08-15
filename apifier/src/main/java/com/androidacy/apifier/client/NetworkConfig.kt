@@ -105,7 +105,9 @@ data class CircuitBreakerConfig(
 /** Retry policy for failed requests. */
 data class RetryConfig(
     val maxAttempts: Int = 1,
+    /** Retry a response whose status is 500-599. */
     val retryOn5xx: Boolean = true,
+    /** Retry only requests whose method is RFC 9110 s9.2.2 idempotent. */
     val retryIdempotentOnly: Boolean = true
 ) {
     init {

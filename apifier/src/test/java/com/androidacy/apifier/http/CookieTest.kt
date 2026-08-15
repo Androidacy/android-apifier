@@ -170,6 +170,15 @@ class CookieTest {
         assertEquals("192.168.1.1", exactDomain.domain)
     }
 
+    /** Fails if a divergent isIpLiteral copy treats a non-dotted-quad shape as an address literal again. */
+    @Test
+    fun threeLabelNumericHostUsesOrdinaryDomainMatching() {
+        val cookie = Cookie.parse(Uri.parse("https://5.6.7/"), "sid=a; Domain=6.7", psl)!!
+
+        assertFalse(cookie.hostOnly)
+        assertEquals("6.7", cookie.domain)
+    }
+
     private fun yearOf(epochMillis: Long): Int {
         val calendar = Calendar.getInstance(TimeZone.getTimeZone("GMT"))
         calendar.timeInMillis = epochMillis

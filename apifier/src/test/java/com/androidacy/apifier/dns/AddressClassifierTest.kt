@@ -58,6 +58,13 @@ class AddressClassifierTest {
         assertEquals(AddressCategory.INVALID, AddressClassifier.classify("fe80::zz"))
     }
 
+    /** Fails if the colon branch of classify() reverts to accepting any colon-bearing string. */
+    @Test
+    fun classifyRejectsAColonBearingHostnameShape() {
+        assertEquals(AddressCategory.INVALID, AddressClassifier.classify("db-primary:5432"))
+        assertEquals(AddressCategory.INVALID, AddressClassifier.classify("too:many:groups:1:2:3:4:5:6:7"))
+    }
+
     @Test
     fun ipLiteralAcceptsBracketedIpv6() {
         assertTrue(AddressClassifier.isIpLiteral("[2606:4700::1111]"))

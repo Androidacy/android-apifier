@@ -114,6 +114,14 @@ class PublicSuffixListTest {
         assertNull(psl.effectiveTldPlusOne("1.2.3.4."))
     }
 
+    /** Fails if a divergent isIpLiteral copy treats a non-dotted-quad shape as an address literal again. */
+    @Test
+    fun threeLabelNumericHostIsNotTreatedAsAnAddress() {
+        val psl = PublicSuffixList(sequenceOf("com"))
+
+        assertEquals("2.3", psl.effectiveTldPlusOne("1.2.3"))
+    }
+
     @Test
     fun bundledListLoadsAndCoversKnownSuffixes() {
         val psl = PublicSuffixList.load(ApplicationProvider.getApplicationContext())

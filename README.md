@@ -151,11 +151,13 @@ migration refuses every call to that host until the pin is updated.
 
 ## Errors
 
-Every failure `send()` throws is an `ApifierException`: `Transport` for a Cronet network failure,
-`CircuitOpen`, `Cancelled`, `CallTimeout`, `RedirectRefused`, `DnsUntrusted`, `HttpError` for a
-non-2xx response passed through `successOrThrow()`, and `Unexpected` for anything the pipeline
-does not model, which carries the original throwable as its cause. Each one reports an
-`ErrorCode` and whether it is retryable.
+`send()` throws `ApifierException` for every call failure, `IllegalStateException` if the client
+is already closed, and `CancellationException` if the calling coroutine is cancelled. The
+`ApifierException` subtypes are `Transport` for a Cronet network failure, `CircuitOpen`,
+`Cancelled`, `CallTimeout`, `RedirectRefused`, `DnsUntrusted`, `HttpError` for a non-2xx response
+passed through `successOrThrow()`, and `Unexpected` for anything the pipeline does not model,
+which carries the original throwable as its cause. Each one reports an `ErrorCode` and whether
+it is retryable.
 
 ## Cookie Storage
 

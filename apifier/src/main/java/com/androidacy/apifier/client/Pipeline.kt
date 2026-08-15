@@ -577,7 +577,8 @@ internal class Pipeline(
     private fun errorCodeOf(e: IOException): ErrorCode = (e as? ApifierException)?.errorCode ?: ErrorCode.OTHER
 
     private companion object {
-        val IDEMPOTENT_METHODS = setOf("GET", "HEAD")
+        /** RFC 9110 s9.2.2 idempotent methods; gates retry when [RetryConfig.retryIdempotentOnly] is set. */
+        val IDEMPOTENT_METHODS = setOf("GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE")
         const val BACKOFF_SLICE_MS = 50L
         const val MAX_VERDICT_BUDGET_MS = Long.MAX_VALUE / 2
         const val NANOS_PER_MILLI = 1_000_000L

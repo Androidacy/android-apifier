@@ -35,6 +35,19 @@ object AddressClassifier {
 
     private val SAFE_HOSTNAME = Regex("""^[a-zA-Z0-9_-]{1,63}(\.[a-zA-Z0-9_-]{1,63})*$""")
     private val IPV4_PATTERN = Regex("""\d{1,3}(\.\d{1,3}){3}""")
+    private val IPV6_PATTERN = Regex(
+        "^(" +
+            "([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|" +
+            "([0-9a-fA-F]{1,4}:){1,7}:|" +
+            "([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|" +
+            "([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|" +
+            "([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|" +
+            "([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|" +
+            "([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|" +
+            "[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|" +
+            ":((:[0-9a-fA-F]{1,4}){1,7}|:)" +
+            ")$"
+    )
 
     /**
      * The category of [ip]. Anything that does not parse as an IP literal is
@@ -76,7 +89,7 @@ object AddressClassifier {
         val stripped = ip.removeSurrounding("[", "]")
         val isIpv4 = stripped.matches(IPV4_PATTERN) &&
             stripped.split('.').all { (it.toIntOrNull() ?: 256) <= 255 }
-        if (!isIpv4 && ':' !in stripped) return null
+        if (!isIpv4 && !stripped.matches(IPV6_PATTERN)) return null
         return try {
             InetAddress.getByName(stripped)
         } catch (e: java.net.UnknownHostException) {

@@ -17,6 +17,7 @@ package com.androidacy.apifier.security
 
 import android.content.Context
 import com.androidacy.apifier.R
+import com.androidacy.apifier.dns.AddressClassifier
 import java.net.IDN
 
 /**
@@ -97,18 +98,12 @@ class PublicSuffixList(rules: Sequence<String>) {
     private fun normalize(domain: String): String? {
         val lower = domain.lowercase()
         val trimmed = if (lower.endsWith(".")) lower.substring(0, lower.length - 1) else lower
-        if (trimmed.isEmpty() || trimmed.endsWith(".") || isIpLiteral(trimmed)) return null
+        if (trimmed.isEmpty() || trimmed.endsWith(".") || AddressClassifier.isIpLiteral(trimmed)) return null
         return try {
             IDN.toASCII(trimmed)
         } catch (e: IllegalArgumentException) {
             null
         }
-    }
-
-    private fun isIpLiteral(host: String): Boolean {
-        if (host.contains(":")) return true
-        val labels = host.split(".")
-        return labels.all { it.isNotEmpty() && it.all(Char::isDigit) }
     }
 
     companion object {

@@ -16,6 +16,7 @@
 package com.androidacy.apifier.http
 
 import android.net.Uri
+import com.androidacy.apifier.dns.AddressClassifier
 import com.androidacy.apifier.security.PublicSuffixList
 import java.net.IDN
 import java.util.Calendar
@@ -178,7 +179,7 @@ class Cookie private constructor(
                 if (d.isEmpty()) return null
                 // RFC 6265 s5.3 step 5: an IP-literal request host accepts only an identical
                 // Domain attribute, never a dotted-suffix match against its own octets.
-                hostOnly = if (isIpLiteral(requestHost)) {
+                hostOnly = if (AddressClassifier.isIpLiteral(requestHost)) {
                     if (d != requestHost) return null
                     true
                 } else if (!domainMatches(requestHost, d)) {
@@ -212,13 +213,6 @@ class Cookie private constructor(
             if (!path.startsWith("/")) return "/"
             val lastSlash = path.lastIndexOf('/')
             return if (lastSlash <= 0) "/" else path.substring(0, lastSlash)
-        }
-
-        /** True for a dotted-quad IPv4 literal or any host containing a `:` (bracketed IPv6). */
-        private fun isIpLiteral(host: String): Boolean {
-            if (host.contains(":")) return true
-            val labels = host.split(".")
-            return labels.all { it.isNotEmpty() && it.all(Char::isDigit) }
         }
 
         /** RFC 6265 s5.1.3: exact match, or [domain] is a suffix of [host] on a label boundary. */
