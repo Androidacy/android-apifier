@@ -37,7 +37,8 @@ import kotlin.concurrent.write
 /**
  * [CookieJar] backed by a [CookieStorage]. A [Cookie.persistent] cookie is JSON-serialized,
  * AES-GCM encrypted via Android Keystore, Base64-encoded, and written to [storage]; a session
- * cookie (RFC 6265 s5.3 step 3) lives only in the decoded cache for this instance's lifetime.
+ * cookie (RFC 6265 s5.3 step 3) is never written to [storage] and is held in memory for this
+ * instance's lifetime.
  */
 class SecureCookieJar(
     private val storage: CookieStorage,
@@ -347,21 +348,35 @@ class SecureCookieJar(
 }
 
 /**
- * Bounded, access-ordered cache of decoded cookies keyed by domain, evicting the least recently
- * used entry past [maxDomains]. Same shape as `com.androidacy.apifier.client.BreakerRegistry`.
- * Eviction here forces a re-decrypt on the domain's next visit; [SecureCookieJar]'s storage still
- * holds the cookie.
+ * Access-ordered map of decoded cookies keyed by domain. An entry whose cookies are all
+ * [Cookie.persistent] is a copy of what [SecureCookieJar]'s storage holds, so past [maxDomains]
+ * the least recently used of those is evicted and the domain's next visit re-decrypts it. An
+ * entry holding a session cookie is that cookie's only copy and is never evicted, which bounds
+ * the map by the number of domains that actually issued a session cookie.
  */
 private class DecodedDomainCache(private val maxDomains: Int = MAX_CACHED_DOMAINS) {
 
-    private val cache = object : LinkedHashMap<String, List<Cookie>>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<Cookie>>): Boolean =
-            size > maxDomains
-    }
+    private val cache = LinkedHashMap<String, List<Cookie>>(16, 0.75f, true)
 
     fun get(domain: String): List<Cookie>? = synchronized(cache) { cache[domain] }
 
-    fun put(domain: String, cookies: List<Cookie>) = synchronized(cache) { cache[domain] = cookies }
+    fun put(domain: String, cookies: List<Cookie>) = synchronized(cache) {
+        cache[domain] = cookies
+        if (cache.size > maxDomains) trim()
+    }
+
+    // Iteration on an access-ordered map runs least recently used first and does not itself
+    // count as an access. Keys are collected before removal so the map is not modified under
+    // its own iterator.
+    private fun trim() {
+        val evictable = cache.entries
+            .asSequence()
+            .filter { entry -> entry.value.all { it.persistent } }
+            .map { it.key }
+            .take(cache.size - maxDomains)
+            .toList()
+        for (key in evictable) cache.remove(key)
+    }
 
     fun remove(domain: String) = synchronized(cache) { cache.remove(domain) }
 

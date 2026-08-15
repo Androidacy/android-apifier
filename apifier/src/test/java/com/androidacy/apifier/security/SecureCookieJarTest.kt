@@ -414,6 +414,29 @@ class SecureCookieJarTest {
     }
 
     @Test
+    fun aSessionCookieOutlivesEvictionPressureFromOtherDomains() {
+        val future = System.currentTimeMillis() + 60_000L
+        jar.saveFromResponse(
+            url("https://session.com/"),
+            listOf(cookie("s", "A", domain = "session.com", expiresAt = Long.MAX_VALUE, persistent = false)),
+        )
+
+        // A session cookie has no copy in storage, so anything that drops it from memory
+        // destroys it. Well past MAX_CACHED_DOMAINS (64) of pressure from other domains.
+        for (i in 0..99) {
+            val domain = "domain$i.com"
+            jar.saveFromResponse(
+                url("https://$domain/"),
+                listOf(cookie("p", "v", domain = domain, expiresAt = future)),
+            )
+        }
+
+        val sent = jar.loadForRequest(url("https://session.com/"))
+        assertEquals(1, sent.size)
+        assertEquals("A", sent[0].value)
+    }
+
+    @Test
     fun savingDoesNotReReadWhatItJustWrote() {
         val future = System.currentTimeMillis() + 60_000L
         val counting = CountingCookieStorage(InMemoryCookieStorage())
