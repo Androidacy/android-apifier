@@ -21,7 +21,9 @@ import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -179,6 +181,42 @@ class ResolverQualificationTest {
 
         assertEquals(ResolverTrust.NONE, qualification.globalTrust())
         assertEquals(ResolverTrust.TRUSTED, qualification.globalTrust())
+    }
+
+    @Test
+    fun shutdownSettlesAVerdictThatIsNeverComing() {
+        val ticks = AtomicLong()
+        val qualification = ResolverQualification(
+            resolve = CLEAN_RESOLVE,
+            executor = Executor { },
+            junkLabelCount = JUNK_LABELS,
+            canaries = CANARIES,
+            // One tick per reading, so a wait that is not released by the shutdown reaches its
+            // budget and answers NONE instead of hanging the suite.
+            clock = { ticks.getAndIncrement() }
+        )
+
+        qualification.shutdown()
+
+        assertEquals(ResolverTrust.UNTRUSTED, runBlocking { qualification.awaitGlobalTrust(1) })
+        assertEquals(ResolverTrust.UNTRUSTED, runBlocking { qualification.awaitHostTrust("api.example.com", 1) })
+    }
+
+    @Test
+    fun aVerdictFromASupersededRoundIsDiscarded() {
+        val flushOnNextProbe = AtomicBoolean(false)
+        lateinit var qualification: ResolverQualification
+        qualification = qualification { host ->
+            if (flushOnNextProbe.compareAndSet(true, false)) qualification.onNetworkChanged()
+            CLEAN_RESOLVE(host)
+        }
+        assertEquals(ResolverTrust.TRUSTED, qualification.globalTrust())
+
+        qualification.onNetworkChanged()
+        flushOnNextProbe.set(true)
+        qualification.globalTrust()
+
+        assertEquals(ResolverTrust.NONE, qualification.globalTrust())
     }
 
     /** The verdict a host reaches once the run its first sight scheduled has finished. */

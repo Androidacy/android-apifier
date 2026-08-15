@@ -24,7 +24,6 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicReferenceArray
 import kotlinx.coroutines.delay
 
@@ -66,11 +65,15 @@ internal class ResolverQualification(
     private class Probe(val host: String, val kind: ProbeKind)
 
     private val random = SecureRandom()
-    private val globalVerdict = AtomicReference(ResolverTrust.NONE)
     private val globalRunning = AtomicBoolean(false)
     private val hostsRunning = ConcurrentHashMap.newKeySet<String>()
     private val generation = AtomicLong()
     private val closed = AtomicBoolean(false)
+
+    /** Held for every verdict read, install and flush, so a flush cannot land between the two halves of an install. */
+    private val verdicts = Any()
+
+    private var globalVerdict = ResolverTrust.NONE
 
     private val hostVerdicts = object : LinkedHashMap<String, ResolverTrust>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ResolverTrust>): Boolean =
@@ -83,7 +86,7 @@ internal class ResolverQualification(
 
     /** The global verdict, scheduling a run when there is none yet. */
     fun globalTrust(): ResolverTrust {
-        val verdict = globalVerdict.get()
+        val verdict = synchronized(verdicts) { globalVerdict }
         if (verdict == ResolverTrust.NONE) scheduleGlobal()
         return verdict
     }
@@ -104,8 +107,9 @@ internal class ResolverQualification(
 
     /** The verdict for [host], scheduling a run on first sight and on every sight after a flush. */
     fun hostTrust(host: String): ResolverTrust {
-        val verdict = synchronized(hostVerdicts) { hostVerdicts[host] }
+        val verdict = synchronized(verdicts) { hostVerdicts[host] }
         if (verdict != null) return verdict
+        if (closed.get()) return ResolverTrust.UNTRUSTED
         scheduleHost(host)
         return ResolverTrust.NONE
     }
@@ -126,14 +130,25 @@ internal class ResolverQualification(
 
     /** Discards every verdict, since a new network invalidates what the old one proved. */
     fun onNetworkChanged() {
-        generation.incrementAndGet()
-        globalVerdict.set(ResolverTrust.NONE)
-        synchronized(hostVerdicts) { hostVerdicts.clear() }
+        if (closed.get()) return
+        synchronized(verdicts) {
+            generation.incrementAndGet()
+            globalVerdict = ResolverTrust.NONE
+            hostVerdicts.clear()
+        }
     }
 
-    /** Stops scheduling further runs. The supplied executor belongs to the caller and is left alone. */
+    /**
+     * Stops scheduling further runs and settles what is still pending as
+     * [ResolverTrust.UNTRUSTED], since no answer is ever coming for it. Anyone waiting on a
+     * verdict is released on their next poll instead of waiting out their whole budget. The
+     * supplied executor belongs to the caller and is left alone.
+     */
     fun shutdown() {
         closed.set(true)
+        synchronized(verdicts) {
+            if (globalVerdict == ResolverTrust.NONE) globalVerdict = ResolverTrust.UNTRUSTED
+        }
     }
 
     private fun scheduleGlobal() {
@@ -143,7 +158,9 @@ internal class ResolverQualification(
             executor.execute {
                 try {
                     val verdict = qualifyGlobal()
-                    if (scheduledAt == generation.get()) globalVerdict.set(verdict)
+                    synchronized(verdicts) {
+                        if (scheduledAt == generation.get()) globalVerdict = verdict
+                    }
                 } finally {
                     globalRunning.set(false)
                 }
@@ -160,7 +177,7 @@ internal class ResolverQualification(
             executor.execute {
                 try {
                     val verdict = qualifyHost(host)
-                    synchronized(hostVerdicts) {
+                    synchronized(verdicts) {
                         if (scheduledAt == generation.get()) hostVerdicts[host] = verdict
                     }
                 } finally {
