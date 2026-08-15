@@ -58,7 +58,7 @@ internal class CronetTransport(
     ): UrlRequest = engine.newUrlRequestBuilder(request.url, callback, executor).apply {
         setHttpMethod(request.method)
 
-        val hasContentType = request.headers.names().any { it.equals("Content-Type", ignoreCase = true) }
+        val hasContentType = request.headers["Content-Type"] != null
         for (index in 0 until request.headers.size) {
             addHeader(request.headers.name(index), request.headers.value(index))
         }
