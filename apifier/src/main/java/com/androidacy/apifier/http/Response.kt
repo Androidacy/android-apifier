@@ -121,7 +121,7 @@ fun Response.successOrThrow(): Response {
 /**
  * The `Retry-After` header, parsed as either delta-seconds or an HTTP-date (RFC 9110 section
  * 10.2.3), or null when the header is absent or matches neither form. A date already in the past
- * yields [Duration.ZERO] rather than a negative duration.
+ * yields [Duration.ZERO], never a negative duration.
  */
 val Response.retryAfter: Duration?
     get() {

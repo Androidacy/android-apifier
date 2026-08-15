@@ -465,7 +465,7 @@ class ApifierClientTest {
         client.close()
     }
 
-    /** Production change that fails this: marking the client rather than the dispatching thread. */
+    /** Production change that fails this: marking the client instead of the dispatching thread. */
     @Test
     @Suppress("DEPRECATION")
     fun closeFromOutsideACallbackStillSucceeds() {

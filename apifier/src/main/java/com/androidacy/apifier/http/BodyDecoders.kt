@@ -35,7 +35,7 @@ suspend inline fun <reified T> ResponseBody.json(json: Json = Json.Default): T =
  * Streams the body one line at a time off [Dispatchers.IO], closing it when the flow completes
  * or its collector is cancelled.
  *
- * Reads the body's source directly rather than through [read]: [read] dispatches with its own
+ * Reads the body's source directly instead of through [read]: [read] dispatches with its own
  * context switch, and a nested one inside this builder body would emit from a coroutine other
  * than the one the flow was collected on, which [Flow] forbids.
  */
