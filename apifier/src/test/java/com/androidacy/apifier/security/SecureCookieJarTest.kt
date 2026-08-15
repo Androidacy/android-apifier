@@ -127,6 +127,19 @@ class SecureCookieJarTest {
     }
 
     @Test
+    fun aDomainCookieIsReturnedForARequestToItsSubdomain() {
+        // A domain-cookie stored under "example.com" and a request to "www.example.com" share a
+        // registrable domain but not a literal domain string; candidateDomains's registrable-domain
+        // comparison must still surface it, unlike a check that compared domain strings directly.
+        val future = System.currentTimeMillis() + 60_000L
+        val domainCookie = cookie("session", "A", domain = "example.com", expiresAt = future)
+
+        jar.saveFromResponse(url("https://example.com/"), listOf(domainCookie))
+
+        assertTrue(jar.loadForRequest(url("https://www.example.com/")).any { it.name == "session" && it.value == "A" })
+    }
+
+    @Test
     fun cookiesScopedByPath() {
         val future = System.currentTimeMillis() + 60_000L
         val cookie = cookie("session", "A", domain = "example.com", path = "/admin", expiresAt = future)
@@ -345,6 +358,21 @@ class SecureCookieJarTest {
         assertTrue(loaded.isEmpty())
         assertNull(storage.getStringSet("cookies_example.com", null))
         assertFalse(storage.getStringSet("_cookie_domains", null).orEmpty().contains("example.com"))
+    }
+
+    @Test
+    fun aJarWithNoUsableKeyLeavesStoredCiphertextIntactAfterALoad() {
+        // Off-device there is no AndroidKeyStore, so this jar's own loadOrCreateKey() (unseeded,
+        // unlike `jar`) resolves secretKey to null and every decode() call fails closed.
+        val keylessJar = SecureCookieJar(storage, psl)
+        storage.putStringSet("cookies_example.com", setOf("undecryptable-without-a-key"))
+        storage.putStringSet("_cookie_domains", setOf("example.com"))
+
+        val loaded = keylessJar.loadForRequest(url("https://example.com/"))
+
+        assertTrue(loaded.isEmpty())
+        assertEquals(setOf("undecryptable-without-a-key"), storage.getStringSet("cookies_example.com", null))
+        assertTrue(storage.getStringSet("_cookie_domains", null).orEmpty().contains("example.com"))
     }
 
     @Test
