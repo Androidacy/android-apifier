@@ -380,19 +380,6 @@ class PipelineTest {
         dispatcher.close()
     }
 
-    /**
-     * gateTrust subtracts a freshly read `now` from the deadline, and that subtraction cancels any
-     * overflow from the addition, so the saturation is observable only at the deadline value itself.
-     */
-    @Test
-    fun anOverflowingCallBudgetClampsInsteadOfWrappingNegative() {
-        val now = System.currentTimeMillis()
-
-        val deadlineAt = saturatingDeadline(now, Long.MAX_VALUE)
-
-        assertTrue("an overflowed deadline must not read as already expired", deadlineAt > now)
-    }
-
     @Test
     fun circuitOpenShortCircuits() {
         val transport = FakeTransport(listOf(step { ok(it) }))

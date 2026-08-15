@@ -95,10 +95,6 @@ internal fun interface AttemptTransport {
     fun newCall(request: Request, listener: TransportListener?): AttemptCall
 }
 
-/** `now + timeoutMs` for an effectively unbounded budget; saturates instead of wrapping negative. */
-internal fun saturatingDeadline(now: Long, timeoutMs: Long): Long =
-    if (timeoutMs > Long.MAX_VALUE - now) Long.MAX_VALUE else now + timeoutMs
-
 /**
  * Per-host circuit breakers, bounded and access-ordered so a client that reaches many hosts
  * cannot grow one entry per host forever.
@@ -201,7 +197,10 @@ internal class Pipeline(
     suspend fun execute(request: Request, options: CallOptions, call: PipelineCall): Response {
         val host = checkNotNull(request.uri.host) { "request has no host" }
         val timeoutMs = options.callTimeoutMillis ?: config.timeouts.call.inWholeMilliseconds
-        val deadlineAt = saturatingDeadline(System.currentTimeMillis(), timeoutMs)
+        val startedAt = System.currentTimeMillis()
+        // An effectively unbounded budget would otherwise wrap the deadline negative.
+        val deadlineAt =
+            if (timeoutMs > Long.MAX_VALUE - startedAt) Long.MAX_VALUE else startedAt + timeoutMs
         val callStartNanos = System.nanoTime()
         val timeoutTask = scheduler.schedule(
             {
