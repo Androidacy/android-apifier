@@ -450,6 +450,104 @@ class ObservationTest {
         assertFalse(global.second[0].willRetry)
     }
 
+    /**
+     * Production change that fails this: reporting the attempt before deciding the surrender, which
+     * ends the call with a SUCCESS event and then throws the timeout.
+     */
+    @Test
+    fun timeoutRacingTheHandoverReportsFailureNotSuccess() {
+        val call = PipelineCall()
+        val transport = FakeTransport(listOf(step { call.markTimedOut(); ok(it) }))
+        val observation = Observation()
+        val global = recordingObserver()
+        observation.addObserver(global.first)
+        val pipeline = pipelineOf(transport, config(), observation)
+
+        val thrown = runCatching { pipeline.executeBlocking(request(), CallOptions(), call) }.exceptionOrNull()
+        awaitEvents(global.second, 1)
+        // A duplicate would follow on the same emit path, so let it land before counting.
+        Thread.sleep(200)
+
+        assertTrue("got $thrown", thrown is ApifierException.CallTimeout)
+        assertEquals("one terminal event, got ${global.second}", 1, global.second.size)
+        assertEquals(Outcome.FAILED, global.second[0].outcome)
+        assertEquals(ErrorCode.CALL_TIMEOUT, global.second[0].errorCode)
+    }
+
+    /** Production change that fails this: dropping the else branch that maps an unmodelled throwable. */
+    @Test
+    fun aThrowingDynamicHeaderProviderStillReportsATerminalEvent() {
+        val transport = FakeTransport(listOf(step { ok(it) }))
+        val observation = Observation()
+        val provider: () -> String = { throw IllegalStateException("no nonce available") }
+        val pipeline = pipelineOf(transport, config(dynamicHeaders = mapOf("X-Nonce" to provider)), observation)
+        val perRequest = recordingObserver()
+
+        val thrown = runCatching {
+            pipeline.executeBlocking(request(), CallOptions(observer = perRequest.first), PipelineCall())
+        }.exceptionOrNull()
+        val seen = awaitEvents(perRequest.second, 1)
+
+        assertTrue("got $thrown", thrown is IllegalStateException)
+        assertEquals(1, seen.size)
+        assertEquals(Outcome.FAILED, seen[0].outcome)
+        assertEquals(ErrorCode.OTHER, seen[0].errorCode)
+        assertEquals(0, transport.seenCount)
+    }
+
+    /** Production change that fails this: any end path that emits no terminal event, or two. */
+    @Test
+    fun everyEndedCallReportsExactlyOneTerminalEvent() {
+        val successEvents = terminalEventsOf(FakeTransport(listOf(step { ok(it) })))
+        val failureEvents = terminalEventsOf(
+            FakeTransport(listOf(step { throw transportFailure(ErrorCode.CONNECTION_RESET) }))
+        )
+        val canceledCall = PipelineCall()
+        thread(isDaemon = true) {
+            Thread.sleep(150)
+            canceledCall.cancel()
+        }
+        val cancelEvents = terminalEventsOf(
+            FakeTransport(listOf(step(answersOnlyToCancel = true) { ok(it) })),
+            call = canceledCall
+        )
+        val timeoutEvents = terminalEventsOf(
+            FakeTransport(listOf(step(answersOnlyToCancel = true) { ok(it) })),
+            options = CallOptions(callTimeoutMillis = 200)
+        )
+        // A header value the request builder refuses leaves the call with an IllegalArgumentException.
+        val unmodelledEvents = terminalEventsOf(
+            FakeTransport(listOf(step { ok(it) })),
+            config = config(headers = mapOf("X-Trace" to "one\ntwo"))
+        )
+
+        assertEquals("success: $successEvents", 1, successEvents.size)
+        assertEquals("transport failure: $failureEvents", 1, failureEvents.size)
+        assertEquals("cancel: $cancelEvents", 1, cancelEvents.size)
+        assertEquals("timeout: $timeoutEvents", 1, timeoutEvents.size)
+        assertEquals("unmodelled throwable: $unmodelledEvents", 1, unmodelledEvents.size)
+    }
+
+    /** Runs one call to its end and returns the terminal events a global observer saw. */
+    private fun terminalEventsOf(
+        transport: FakeTransport,
+        config: NetworkConfig = config(),
+        options: CallOptions = CallOptions(),
+        call: PipelineCall = PipelineCall()
+    ): List<RequestEvent> {
+        val observation = Observation()
+        val global = recordingObserver()
+        observation.addObserver(global.first)
+
+        runCatching { pipelineOf(transport, config, observation).executeBlocking(request(), options, call).close() }
+        awaitEvents(global.second, 1)
+        // A duplicate would follow on the same emit path, so let it land before counting.
+        Thread.sleep(200)
+        observation.close()
+
+        return global.second.filter { !it.willRetry }
+    }
+
     private fun measureMillis(block: () -> Unit): Long {
         val start = System.nanoTime()
         block()
@@ -488,7 +586,11 @@ class ObservationTest {
 
     private fun request(): Request = Request.Builder().url("https://$HOST/resource").build()
 
-    private fun config(retry: RetryConfig = RetryConfig()) = NetworkConfig(retryConfig = retry)
+    private fun config(
+        retry: RetryConfig = RetryConfig(),
+        headers: Map<String, String> = emptyMap(),
+        dynamicHeaders: Map<String, () -> String> = emptyMap()
+    ) = NetworkConfig(headers = headers, dynamicHeaders = dynamicHeaders, retryConfig = retry)
 
     private fun pipelineOf(
         transport: FakeTransport,

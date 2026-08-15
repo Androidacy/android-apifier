@@ -215,19 +215,17 @@ internal class Pipeline(
             attempts(request, options, call, breaker, timeoutMs, host)
         } catch (e: Throwable) {
             timeoutTask.cancel(false)
-            // Several paths end a call without reaching reportAttempt: the trust gate, the
-            // breaker, and a cancel or timeout landing in backoff between attempts. A coroutine
-            // cancellation is one of them and is not an IOException, but it ends the call just as
-            // a caller's own cancel does, and the observer is owed the same terminal event.
+            // Several paths end a call without reaching reportAttempt: the trust gate, the breaker,
+            // a cancel or timeout landing in backoff, and consumer code throwing from a header
+            // provider or a cookie jar. A cancellation is not an IOException but ends the call just
+            // as a caller's own cancel does, and the observer is owed one event whatever ended it.
             if (!call.terminalEventEmitted) {
                 val errorCode = when (e) {
                     is IOException -> errorCodeOf(e)
                     is CancellationException -> ErrorCode.CANCELLED
-                    else -> null
+                    else -> ErrorCode.OTHER
                 }
-                errorCode?.let {
-                    reportTerminalFailure(host, request.method, call, it, callStartNanos, options)
-                }
+                reportTerminalFailure(host, request.method, call, errorCode, callStartNanos, options)
             }
             throw e
         }
@@ -281,6 +279,13 @@ internal class Pipeline(
             val attemptStartNanos = System.nanoTime()
             try {
                 val response = attemptOnce(prepared, call, metrics)
+                // A timeout or cancel that landed while this response was in hand outranks it, and
+                // the body it carries would fail on first read anyway. Surrendering ahead of the
+                // report is what keeps the reported outcome and the thrown one the same.
+                if (call.isTimedOut || call.isCanceled) {
+                    response.close()
+                    surrenderIfDone(call, timeoutMs)
+                }
                 val willRetry = response.code >= 500 && attempt < maxAttempts - 1 && retry.retryOn5xx &&
                     (!retry.retryIdempotentOnly || idempotent)
                 reportAttempt(
@@ -288,12 +293,6 @@ internal class Pipeline(
                     Outcome.SUCCESS, errorCode = null, responseCode = response.code, call, options
                 )
                 if (!willRetry) {
-                    // A timeout that landed while this response was in hand outranks it, and the
-                    // body it carries would fail on first read anyway.
-                    if (call.isTimedOut || call.isCanceled) {
-                        response.close()
-                        surrenderIfDone(call, timeoutMs)
-                    }
                     if (response.code >= 500) breaker?.recordFailure() else breaker?.recordSuccess()
                     return withProgress(response, options)
                 }
@@ -492,8 +491,9 @@ internal class Pipeline(
 
     /**
      * Reports a call-ending failure that never reached [reportAttempt]: the trust gate, the
-     * breaker, a surrender ahead of an attempt, or a cancel/timeout landing in backoff between
-     * attempts. Nothing reached the transport, so there is nothing to wait on; the metrics are zero.
+     * breaker, a surrender ahead of an attempt, a cancel/timeout landing in backoff between
+     * attempts, or consumer code throwing while the request is being prepared. Nothing reached the
+     * transport, so there is nothing to wait on; the metrics are zero.
      */
     private fun reportTerminalFailure(
         host: String,
