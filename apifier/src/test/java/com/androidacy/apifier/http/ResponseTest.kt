@@ -374,6 +374,13 @@ class ResponseTest {
     }
 
     @Test
+    fun retryAfterCoercesANegativeDeltaSecondsToZero() {
+        val response = newBuilder().headers(Headers.headersOf("Retry-After", "-5")).build()
+
+        assertEquals(kotlin.time.Duration.ZERO, response.retryAfter)
+    }
+
+    @Test
     fun retryAfterIsNullWhenAbsentOrUnparseable() {
         assertNull(newBuilder().build().retryAfter)
         assertNull(newBuilder().headers(Headers.headersOf("Retry-After", "soon")).build().retryAfter)

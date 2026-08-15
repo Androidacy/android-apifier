@@ -126,7 +126,7 @@ fun Response.successOrThrow(): Response {
 val Response.retryAfter: Duration?
     get() {
         val value = header("Retry-After") ?: return null
-        value.toLongOrNull()?.let { return it.seconds }
+        value.toLongOrNull()?.let { return it.seconds.coerceAtLeast(Duration.ZERO) }
         val date = runCatching { ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME) }
             .getOrNull() ?: return null
         return JavaDuration.between(Instant.now(), date.toInstant()).toKotlinDuration().coerceAtLeast(Duration.ZERO)

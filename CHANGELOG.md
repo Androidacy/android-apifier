@@ -38,12 +38,16 @@
   `ResponseBody.read { source -> ... }`, which hands a scoped `BufferedSource` to the block and
   closes the body when the block returns or throws, or with `ResponseBody.writeTo(file)`, which
   streams straight to disk. Neither holds the body in memory.
-- `ResponseBody.bytes()` and `string()` still work but carry `@Discouraged`: each reads the whole
-  body into memory before returning it, so a large or unknown-length response belongs on `read`
-  or `writeTo` instead.
+- `ResponseBody.bytes()` carries `@Discouraged` and `@Deprecated`, with no removal version attached
+  and none planned. `string()` carries neither annotation and is not deprecated. Both still work;
+  either one reads the whole body into memory before returning it, so a large or unknown-length
+  response belongs on `read` or `writeTo` instead.
 - `ResponseBody.json<T>()` decodes a JSON body straight off its source with `kotlinx.serialization`,
   and `ResponseBody.lines()` returns a `Flow<String>` of the body one line at a time. Both close
-  the body when they finish.
+  the body when they finish. `json` needs `org.jetbrains.kotlinx:kotlinx-serialization-json` and
+  `org.jetbrains.kotlinx:kotlinx-serialization-json-okio` on your own classpath: apifier compiles
+  against them but does not bundle them, so a project that never calls `json` is not forced to
+  pull in a serialization library it does not use.
 - `Requester.header(name, value)` attaches a header to a single call without touching the
   client's own configuration:
   ```kotlin
@@ -56,9 +60,10 @@
   in place of a hand-written `if (!response.isSuccessful) ...` check, which is easy to write
   without closing the body on the failing path.
 - `Response.retryAfter` parses the `Retry-After` header in either form the HTTP spec allows,
-  a delta in seconds or an HTTP-date, and returns the remaining `kotlin.time.Duration`. It returns
-  `Duration.ZERO` for a date already in the past and `null` when the header is missing or in
-  neither form.
+  a delta in seconds or an HTTP-date, and returns the remaining `kotlin.time.Duration`. A date
+  already in the past, or a negative delta a malformed server sent, both come back as
+  `Duration.ZERO` rather than a negative duration; the header returns `null` when it is missing
+  or in neither form.
 
 ### DNS trust
 
