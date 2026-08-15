@@ -15,7 +15,7 @@ HTTP and API networking library for Android, built directly on Cronet.
 - **Typed errors**: failures surface as `ApifierException` subtypes instead of a generic `IOException`
 - **Request observation**: `ApifierClient.events` is a `SharedFlow<RequestEvent>` carrying outcome,
   timing and byte counts for every attempt; a per-call `observe()` view sees only that call's event
-- **Protected-domain trust check**: compares a configured host's system DNS answer against known-good public resolvers before the call runs
+- **Resolver qualification**: continuously checks whether the platform's DNS resolver is answering honestly, independent of any host the app calls; optionally refuses calls while it is not, and per-host IP pins for hosts where you know the expected addresses
 - **Encrypted cookies**: public-suffix-scoped cookie jar backed by a pluggable store, AES-GCM
   encrypted with an Android Keystore key (StrongBox or TEE where the device has one). A device
   with no usable Keystore drops cookies instead of writing them in cleartext
@@ -76,7 +76,10 @@ val client = ApifierClient(context) {
     maxAttempts(3)
     timeout(90.seconds)
 
-    protectedDomains("api.example.com")
+    ensureTrustworthyResolver(true)
+    hostIpPins {
+        pin("api.example.com", "203.0.113.10")
+    }
     cookieStorage(MyCookieStorage())
     header("User-Agent", "MyApp/1.0")
     dynamicHeader("Authorization") { getAuthToken() }
@@ -114,18 +117,36 @@ scope.launch {
 val response = client.maxAttempts(1).observe { report(it) }.get("https://api.example.com/data")
 ```
 
-## Protected Domains
+## Resolver Qualification
 
-For each configured host, apifier asks known-good public resolvers what the name resolves to and
-compares that against the system resolver's answer. A host whose answers disagree, or that a
-resolver could not be reached over a pinned-root connection, reports through
-`protectedDomainStatus`; with enforcement on, a `FAIL` verdict refuses the call with
-`ApifierException.DnsUntrusted`. Verdicts keep computing whether or not enforcement is on.
+Every client continuously probes the platform's DNS resolver: names that must not resolve, and
+public names that must resolve to public address space. A resolver that cannot answer both
+consistently is untrustworthy, and the check runs the same way regardless of which host the app is
+about to call. This detects a resolver that is broadly lying or hijacked; it does not detect a
+single hostname being redirected while the rest of DNS behaves normally, and it makes no attempt to
+authenticate any one host's answer against a third-party DNS provider, since a geo-DNS fronted host
+can see different, equally legitimate answers from different resolvers.
 
 ```kotlin
-if (client.protectedDomainStatus("api.example.com") == TrustStatus.FAIL) warnUser()
-client.setEnforceProtectedDomains(false)
+val trustworthy = client.isResolverTrustworthy()
 ```
+
+Set `ensureTrustworthyResolver(true)` in the DSL to refuse calls while the resolver fails
+qualification; left off, the checks still run but nothing is blocked on them.
+
+For a host where you know the expected addresses, declare a pin instead:
+
+```kotlin
+hostIpPins {
+    pin("api.example.com", "203.0.113.10")
+}
+```
+
+Declaring any pin turns on enforcement for the whole client, regardless of
+`ensureTrustworthyResolver`. A pinned host whose resolved address is not among the declared ones
+refuses the call with `ApifierException.DnsUntrusted`. Pins are unsuited to a host behind geo-DNS
+fronting, where legitimate answers differ by resolver vantage point, and a pin outliving an address
+migration refuses every call to that host until the pin is updated.
 
 ## Errors
 
@@ -233,9 +254,11 @@ backend is configured.
 - `ApifierClient` is `Closeable` and owns an engine, thread pools and a network callback. Call
   `close()` when you are done with it.
 - DoH resolution and the OkHttp interceptor are gone. Configure TLS trust through your app's
-  Network Security Configuration, and protected-domain checking through `protectedDomains(...)`.
-- `protectedDomains(...)` rejects a hostname with a trailing dot, and the client constructor throws
-  on it. Pass `api.example.com`, not `api.example.com.`
+  Network Security Configuration.
+- The DSL entry, status query and enforcement toggle for the old per-host DNS comparison are gone.
+  `ensureTrustworthyResolver(true)` and `isResolverTrustworthy()` replace them with
+  host-independent resolver qualification, and `hostIpPins { ... }` covers a host whose expected
+  addresses you already know; see [Resolver Qualification](#resolver-qualification).
 
 ## Requirements
 

@@ -64,9 +64,7 @@ object AddressClassifier {
 
     /**
      * True when [host] is safe to pass through host-scoped plumbing: only unreserved characters,
-     * and every label 1 to 63 bytes. The label rule matches what [DnsWireCodec.buildQuery]
-     * accepts, so a hostname that passes here can always be turned into a query. A trailing dot
-     * leaves an empty label and both reject it.
+     * and every label 1 to 63 bytes. A trailing dot leaves an empty label and is rejected.
      */
     fun isSafeHostname(host: String): Boolean = SAFE_HOSTNAME.matches(host)
 

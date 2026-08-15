@@ -31,13 +31,6 @@ data class NetworkConfig(
     val headers: Map<String, String> = emptyMap(),
     val dynamicHeaders: Map<String, () -> String> = emptyMap(),
     /**
-     * Hosts whose system DNS answers are compared against known-good public resolvers before a
-     * call to them runs. Empty switches the check off entirely.
-     */
-    val protectedDomains: List<String> = emptyList(),
-    /** Whether a failed comparison refuses the call. Verdicts are computed either way. */
-    val enforceProtectedDomains: Boolean = true,
-    /**
      * Whether a call is refused while the platform resolver fails qualification. The checks run
      * for every client either way; only the refusal is opt-in. A no-op while [hostIpPins] is
      * non-empty: pins force enforcement on regardless of this flag.
@@ -128,8 +121,6 @@ class NetworkConfigBuilder {
     private var cookieStorage: CookieStorage? = null
     private val headers = mutableMapOf<String, String>()
     private val dynamicHeaders = mutableMapOf<String, () -> String>()
-    private val protectedDomains = mutableListOf<String>()
-    var enforceProtectedDomains: Boolean = true
     private var ensureTrustworthyResolver: Boolean = false
     internal var hostIpPins: Map<String, Set<String>> = emptyMap()
     var logRequests: Boolean = false
@@ -139,11 +130,6 @@ class NetworkConfigBuilder {
     /** Refuses calls while the platform resolver fails qualification; see [NetworkConfig.ensureTrustworthyResolver]. */
     fun ensureTrustworthyResolver(enabled: Boolean) {
         ensureTrustworthyResolver = enabled
-    }
-
-    /** Hosts to compare against known-good resolvers before calling them. */
-    fun protectedDomains(vararg domains: String) {
-        protectedDomains.addAll(domains)
     }
 
     /** Default attempt ceiling for every call this client makes; see [Requester.maxAttempts]. */
@@ -197,8 +183,8 @@ class NetworkConfigBuilder {
 
     fun build() = NetworkConfig(
         cronetConfig, timeouts, retryConfig, circuitBreakerConfig,
-        cookieStorage, headers, dynamicHeaders, protectedDomains.toList(),
-        enforceProtectedDomains, ensureTrustworthyResolver, hostIpPins, logRequests, defaultObserver
+        cookieStorage, headers, dynamicHeaders,
+        ensureTrustworthyResolver, hostIpPins, logRequests, defaultObserver
     )
 }
 
