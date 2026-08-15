@@ -59,7 +59,14 @@ data class CronetConfig(
     val cacheSizeBytes: Long = 256 * 1024 * 1024, // 256MB default
     /** Gates Cronet's built-in resolver, stale-DNS serving, and host-cache persistence. */
     val enableBuiltInDnsResolver: Boolean = true,
-    val enableStaleDns: Boolean = true
+    val enableStaleDns: Boolean = true,
+    /**
+     * Whether QUIC connections may send early data on a TLS 1.3 resumption. Early data has no
+     * replay protection, so a request sent as early data can be replayed by a network attacker
+     * against a server that does not itself defend against replay. Only in effect while
+     * [enableQuic] is on.
+     */
+    val enableTlsZeroRtt: Boolean = true
 ) {
     init {
         require(cacheSizeBytes > 0) { "cacheSizeBytes must be positive" }
@@ -201,6 +208,7 @@ class CronetConfigBuilder {
     var cacheSizeBytes: Long = 256 * 1024 * 1024
     var enableBuiltInDnsResolver = true
     var enableStaleDns = true
+    var enableTlsZeroRtt = true
 
     fun quicHint(host: String, port: Int = 443, alternatePort: Int = 443) {
         quicHints.add(Triple(host, port, alternatePort))
@@ -208,7 +216,7 @@ class CronetConfigBuilder {
 
     fun build() = CronetConfig(
         enableQuic, enableHttp2, enableBrotli, quicHints,
-        cacheDirectory, cacheSizeBytes, enableBuiltInDnsResolver, enableStaleDns
+        cacheDirectory, cacheSizeBytes, enableBuiltInDnsResolver, enableStaleDns, enableTlsZeroRtt
     )
 }
 

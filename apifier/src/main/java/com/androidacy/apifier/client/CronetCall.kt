@@ -80,6 +80,7 @@ internal class CronetCall(
 
     private companion object {
         const val MAX_REDIRECTS = 20
+        val CREDENTIAL_HEADERS = listOf("Cookie", "Authorization", "Proxy-Authorization")
     }
 
     private val urlRequest = AtomicReference<UrlRequest?>()
@@ -101,15 +102,17 @@ internal class CronetCall(
     private var redirectCount = 0
 
     /**
-     * Host the request's `Cookie` header was built for, or null when it carries none.
+     * Host the request was built for, when it carries a `Cookie`, `Authorization` or
+     * `Proxy-Authorization` header, or null when it carries none of those.
      *
      * Cronet follows redirects inside one request and re-sends the caller's extra headers on
      * every hop, and Chromium's redirect header update (`net/url_request/redirect_util.cc`)
-     * rewrites `Origin` and the `Content-*` set but leaves `Cookie` alone. Nothing else in this
-     * path is host-aware, so without this the session would follow a hop to any https host.
+     * rewrites `Origin` and the `Content-*` set but leaves the rest, these included, alone.
+     * Nothing else in this path is host-aware, so without this a credential would follow a hop
+     * to any https host.
      */
-    private val cookieScopeHost: String? =
-        if (request.header("Cookie") == null) null else request.uri.host?.lowercase()
+    private val credentialScopeHost: String? =
+        if (CREDENTIAL_HEADERS.none { request.header(it) != null }) null else request.uri.host?.lowercase()
 
     fun enqueue(outcome: CallOutcome) {
         check(enqueued.compareAndSet(false, true)) { "Call already enqueued" }
@@ -201,9 +204,9 @@ internal class CronetCall(
                 redirectCount > MAX_REDIRECTS -> "Too many redirects ($MAX_REDIRECTS)"
                 !newLocationUrl.startsWith("https://", ignoreCase = true) ->
                     "Redirect to non-HTTPS URL rejected: $newLocationUrl"
-                cookieScopeHost != null &&
-                    Uri.parse(newLocationUrl).host?.lowercase() != cookieScopeHost ->
-                    "Redirect to another host rejected while carrying cookies: $newLocationUrl"
+                credentialScopeHost != null &&
+                    Uri.parse(newLocationUrl).host?.lowercase() != credentialScopeHost ->
+                    "Redirect to another host rejected while carrying credentials: $newLocationUrl"
                 else -> null
             }
             if (refusal != null) {

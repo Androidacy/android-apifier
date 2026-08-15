@@ -96,7 +96,7 @@ class CronetCallTest {
         assertEquals(0, harness.urlRequest.followed)
         assertEquals(1, harness.urlRequest.canceled)
         val refusal = harness.callback.failures.single() as ApifierException.RedirectRefused
-        assertTrue(refusal.reason.contains("carrying cookies"))
+        assertTrue(refusal.reason.contains("carrying credentials"))
         assertFalse(refusal.retryable)
     }
 
@@ -121,6 +121,34 @@ class CronetCallTest {
 
         assertEquals(1, harness.urlRequest.followed)
         assertEquals(0, harness.urlRequest.canceled)
+    }
+
+    /** Fails if the redirect gate stays scoped to the `Cookie` header alone. */
+    @Test
+    fun aCrossHostRedirectCarryingAuthorizationIsRefused() {
+        val harness = Harness(requestHeaders = listOf("Authorization" to "Bearer token"))
+        harness.enqueue()
+
+        harness.cronetCallback.onRedirectReceived(harness.urlRequest, info(), "https://other.example.net/x")
+
+        assertEquals(0, harness.urlRequest.followed)
+        assertEquals(1, harness.urlRequest.canceled)
+        val refusal = harness.callback.failures.single() as ApifierException.RedirectRefused
+        assertTrue(refusal.reason.contains("carrying credentials"))
+        assertFalse(refusal.retryable)
+    }
+
+    /** Fails if the gate refuses same-host hops whenever a credential header is merely present. */
+    @Test
+    fun aSameHostRedirectCarryingAuthorizationIsFollowed() {
+        val harness = Harness(requestHeaders = listOf("Authorization" to "Bearer token"))
+        harness.enqueue()
+
+        harness.cronetCallback.onRedirectReceived(harness.urlRequest, info(), "https://example.com/second")
+
+        assertEquals(1, harness.urlRequest.followed)
+        assertEquals(0, harness.urlRequest.canceled)
+        assertEquals(0, harness.callback.failures.size)
     }
 
     @Test

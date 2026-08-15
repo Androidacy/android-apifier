@@ -76,6 +76,12 @@
   addresses you already know; see the README's
   [Resolver Qualification](README.md#resolver-qualification) section.
 
+### Redirects
+
+- A redirect to a different host is now refused while the request carries `Authorization` or
+  `Proxy-Authorization`, the same way it already was for `Cookie`. A caller that relied on such a
+  redirect succeeding needs to authenticate again after following the redirect itself.
+
 ### Cookies
 
 - A `Set-Cookie` with neither `Expires` nor `Max-Age` is now a session cookie: held in memory for

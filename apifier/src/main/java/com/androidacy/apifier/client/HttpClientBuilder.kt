@@ -150,7 +150,7 @@ class HttpClientBuilder(
                 setQuicOptions(
                     QuicOptions.builder()
                         .retryWithoutAltSvcOnQuicErrors(true)
-                        .enableTlsZeroRtt(true)
+                        .enableTlsZeroRtt(config.cronetConfig.enableTlsZeroRtt)
                         .setInMemoryServerConfigsCacheSize(8192)
                         .build()
                 )
