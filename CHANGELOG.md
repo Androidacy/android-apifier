@@ -31,9 +31,34 @@
   a call's upload and download phases never interleave.
 - `addObserver`/`removeObserver` are deprecated in favour of `ApifierClient.events`, a
   `SharedFlow<RequestEvent>`; see the README's [Observation](README.md#observation) section.
-- `ResponseBody.source()` and `byteStream()` are deprecated in favour of the suspend
-  `ResponseBody.bytes()`/`string()`, which read the whole body on `Dispatchers.IO` instead of
-  blocking the calling thread.
+
+### Streaming and per-call headers
+
+- `ResponseBody.byteStream()` is gone and `source()` is no longer public. Read a body with
+  `ResponseBody.read { source -> ... }`, which hands a scoped `BufferedSource` to the block and
+  closes the body when the block returns or throws, or with `ResponseBody.writeTo(file)`, which
+  streams straight to disk. Neither holds the body in memory.
+- `ResponseBody.bytes()` and `string()` still work but carry `@Discouraged`: each reads the whole
+  body into memory before returning it, so a large or unknown-length response belongs on `read`
+  or `writeTo` instead.
+- `ResponseBody.json<T>()` decodes a JSON body straight off its source with `kotlinx.serialization`,
+  and `ResponseBody.lines()` returns a `Flow<String>` of the body one line at a time. Both close
+  the body when they finish.
+- `Requester.header(name, value)` attaches a header to a single call without touching the
+  client's own configuration:
+  ```kotlin
+  client.header("X-Request-Id", requestId).get(url)
+  ```
+  A header already present on the `Request` passed to `send()` wins over this, and this wins over
+  a same-named header configured client-wide.
+- `Response.successOrThrow()` returns the response on a 2xx status and otherwise closes its body
+  and throws `ApifierException.HttpError`, which carries the status in its `code` property. Use it
+  in place of a hand-written `if (!response.isSuccessful) ...` check, which is easy to write
+  without closing the body on the failing path.
+- `Response.retryAfter` parses the `Retry-After` header in either form the HTTP spec allows,
+  a delta in seconds or an HTTP-date, and returns the remaining `kotlin.time.Duration`. It returns
+  `Duration.ZERO` for a date already in the past and `null` when the header is missing or in
+  neither form.
 
 ### DNS trust
 

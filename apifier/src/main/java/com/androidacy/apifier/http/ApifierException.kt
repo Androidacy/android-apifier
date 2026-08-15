@@ -95,6 +95,11 @@ sealed class ApifierException(message: String, cause: Throwable? = null) : IOExc
     class Unexpected(cause: Throwable) : ApifierException(cause.toString(), cause) {
         override val errorCode: ErrorCode = ErrorCode.OTHER
     }
+
+    /** The response carried a non-2xx status of [code]. Thrown by [successOrThrow]. */
+    class HttpError(val code: Int) : ApifierException("HTTP request failed with status $code") {
+        override val errorCode: ErrorCode = ErrorCode.OTHER
+    }
 }
 
 private fun mapNetworkErrorCode(code: Int): ErrorCode = when (code) {

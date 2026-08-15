@@ -20,6 +20,10 @@ import com.androidacy.apifier.http.ResponseBody.Companion.asResponseBody
 import com.androidacy.apifier.http.ResponseBody.Companion.toResponseBody
 import java.io.File
 import java.io.IOException
+import java.time.ZoneOffset
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.test.runTest
 import okio.Buffer
 import okio.ForwardingSource
@@ -30,6 +34,8 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -301,6 +307,76 @@ class ResponseTest {
             IllegalStateException::class.java,
             runCatching { Response.Builder().request(request()).build() }.exceptionOrNull()?.javaClass
         )
+    }
+
+    @Test
+    fun successOrThrowReturnsASuccessfulResponse() {
+        val response = newBuilder().code(200).build()
+
+        assertSame(response, response.successOrThrow())
+    }
+
+    @Test
+    fun successOrThrowThrowsCarryingTheStatus() {
+        val response = newBuilder().code(404).build()
+
+        val thrown = try {
+            response.successOrThrow()
+            null
+        } catch (e: ApifierException.HttpError) {
+            e
+        }
+
+        assertEquals(404, thrown?.code)
+    }
+
+    @Test
+    fun successOrThrowClosesTheBodyWhenItThrows() {
+        var closed = false
+        val source = object : ForwardingSource(Buffer().writeUtf8("hello")) {
+            override fun close() {
+                closed = true
+                super.close()
+            }
+        }.buffer()
+        val response = newBuilder().code(500).body(source.asResponseBody(null, 5L)).build()
+
+        runCatching { response.successOrThrow() }
+
+        assertTrue(closed)
+    }
+
+    @Test
+    fun retryAfterParsesDeltaSeconds() {
+        val response = newBuilder().headers(Headers.headersOf("Retry-After", "120")).build()
+
+        assertEquals(120.seconds, response.retryAfter)
+    }
+
+    @Test
+    fun retryAfterParsesAnHttpDate() {
+        val target = ZonedDateTime.now(ZoneOffset.UTC).plusSeconds(90)
+        val header = target.format(DateTimeFormatter.RFC_1123_DATE_TIME)
+        val response = newBuilder().headers(Headers.headersOf("Retry-After", header)).build()
+
+        val parsed = response.retryAfter
+
+        assertTrue("expected a duration near 90s, got $parsed", parsed != null && (parsed - 90.seconds).inWholeSeconds in -2..2)
+    }
+
+    @Test
+    fun retryAfterIsZeroForADateInThePast() {
+        val target = ZonedDateTime.now(ZoneOffset.UTC).minusSeconds(90)
+        val header = target.format(DateTimeFormatter.RFC_1123_DATE_TIME)
+        val response = newBuilder().headers(Headers.headersOf("Retry-After", header)).build()
+
+        assertEquals(kotlin.time.Duration.ZERO, response.retryAfter)
+    }
+
+    @Test
+    fun retryAfterIsNullWhenAbsentOrUnparseable() {
+        assertNull(newBuilder().build().retryAfter)
+        assertNull(newBuilder().headers(Headers.headersOf("Retry-After", "soon")).build().retryAfter)
     }
 
     private fun request(): Request = Request.Builder().url("https://example.com/").build()

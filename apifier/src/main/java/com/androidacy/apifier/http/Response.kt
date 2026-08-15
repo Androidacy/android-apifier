@@ -17,6 +17,13 @@ package com.androidacy.apifier.http
 
 import com.androidacy.apifier.http.ResponseBody.Companion.toResponseBody
 import java.io.Closeable
+import java.time.Duration as JavaDuration
+import java.time.Instant
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.toKotlinDuration
 
 /**
  * An HTTP response.
@@ -99,3 +106,28 @@ class Response private constructor(
         }
     }
 }
+
+/**
+ * Returns this response when [Response.isSuccessful], otherwise closes its body and throws
+ * [ApifierException.HttpError]. A hand-written status check that throws without closing leaks
+ * the connection on every non-2xx.
+ */
+fun Response.successOrThrow(): Response {
+    if (isSuccessful) return this
+    close()
+    throw ApifierException.HttpError(code)
+}
+
+/**
+ * The `Retry-After` header, parsed as either delta-seconds or an HTTP-date (RFC 9110 section
+ * 10.2.3), or null when the header is absent or matches neither form. A date already in the past
+ * yields [Duration.ZERO] rather than a negative duration.
+ */
+val Response.retryAfter: Duration?
+    get() {
+        val value = header("Retry-After") ?: return null
+        value.toLongOrNull()?.let { return it.seconds }
+        val date = runCatching { ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME) }
+            .getOrNull() ?: return null
+        return JavaDuration.between(Instant.now(), date.toInstant()).toKotlinDuration().coerceAtLeast(Duration.ZERO)
+    }
