@@ -7,8 +7,8 @@
 - `send()` (and `get`/`post`/`delete`/`head`/`download`/`upload`) is the call surface now: a
   `suspend fun` on `Requester` that returns the `Response` directly, in place of `enqueue`/`execute`.
 - `Call`, `Call.enqueue`, `Call.execute`, `Call.cancel`, `Call.isCanceled` and `Call.Factory` are
-  deprecated. They still work but are removed in 4.0. `Callback` itself is not deprecated, since
-  `Call.enqueue` still needs somewhere to report to until it is gone.
+  deprecated. They still work but are removed in 4.0. `Callback` itself is not deprecated; it
+  keeps receiving the result of `Call.enqueue` until that goes away too.
 - If you keep using callbacks in the meantime: callbacks run on the client's worker pool, and the
   body handed to `onResponse` is still streaming when the callback fires. Post to your own handler
   before touching the UI, read or close the body, and do not treat the callback returning as the
