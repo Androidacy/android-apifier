@@ -39,9 +39,16 @@ data class NetworkConfig(
     val enforceProtectedDomains: Boolean = true,
     /**
      * Whether a call is refused while the platform resolver fails qualification. The checks run
-     * for every client either way; only the refusal is opt-in.
+     * for every client either way; only the refusal is opt-in. A no-op while [hostIpPins] is
+     * non-empty: pins force enforcement on regardless of this flag.
      */
     val ensureTrustworthyResolver: Boolean = false,
+    /**
+     * Per-host address pins; see [com.androidacy.apifier.dns.hostIpPins]. Declaring a pin for a
+     * host forces enforcement on for the whole client, making [ensureTrustworthyResolver] a
+     * no-op.
+     */
+    val hostIpPins: Map<String, Set<String>> = emptyMap(),
     /** Registers an internal `Log.d`-per-event observer. Advisory only; release logcat is stripped. */
     val logRequests: Boolean = false,
     /** Observer used for a call whose [com.androidacy.apifier.client.Requester.observe] set none. */
@@ -124,6 +131,7 @@ class NetworkConfigBuilder {
     private val protectedDomains = mutableListOf<String>()
     var enforceProtectedDomains: Boolean = true
     private var ensureTrustworthyResolver: Boolean = false
+    internal var hostIpPins: Map<String, Set<String>> = emptyMap()
     var logRequests: Boolean = false
     @Suppress("DEPRECATION")
     private var defaultObserver: RequestObserver? = null
@@ -190,7 +198,7 @@ class NetworkConfigBuilder {
     fun build() = NetworkConfig(
         cronetConfig, timeouts, retryConfig, circuitBreakerConfig,
         cookieStorage, headers, dynamicHeaders, protectedDomains.toList(),
-        enforceProtectedDomains, ensureTrustworthyResolver, logRequests, defaultObserver
+        enforceProtectedDomains, ensureTrustworthyResolver, hostIpPins, logRequests, defaultObserver
     )
 }
 

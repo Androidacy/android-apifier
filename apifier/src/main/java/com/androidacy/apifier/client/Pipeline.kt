@@ -16,6 +16,7 @@
 package com.androidacy.apifier.client
 
 import android.net.Uri
+import com.androidacy.apifier.dns.HostIpPins
 import com.androidacy.apifier.dns.ResolverQualification
 import com.androidacy.apifier.dns.ResolverTrust
 import com.androidacy.apifier.http.ApifierException
@@ -49,6 +50,8 @@ import okio.ForwardingSource
 import okio.Source
 import okio.buffer
 import java.io.IOException
+import java.net.InetAddress
+import java.net.UnknownHostException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -248,15 +251,29 @@ internal class Pipeline(
      * Runs once per call and ahead of the breaker, so a host refused here never records a failure
      * against a server that did nothing wrong. A verdict still pending is waited for on the call's
      * own budget, so a check that runs out of time ends the call at the instant the request would
-     * have ended anyway.
+     * have ended anyway. A pin declared for [host] is consulted regardless of
+     * [NetworkConfig.ensureTrustworthyResolver], and its presence forces the qualification check
+     * below to run too.
      */
     private suspend fun gateResolver(host: String, deadlineAt: Long) {
-        if (!config.ensureTrustworthyResolver) return
+        if (config.hostIpPins.containsKey(host.lowercase()) && HostIpPins.refuses(config.hostIpPins, host, resolveAddresses(host))) {
+            throw ApifierException.DnsUntrusted(host)
+        }
+        if (!config.ensureTrustworthyResolver && config.hostIpPins.isEmpty()) return
         if (qualification.awaitGlobalTrust(verdictBudget(deadlineAt)) != ResolverTrust.TRUSTED) {
             throw ApifierException.DnsUntrusted(host)
         }
         if (qualification.awaitHostTrust(host, verdictBudget(deadlineAt)) != ResolverTrust.TRUSTED) {
             throw ApifierException.DnsUntrusted(host)
+        }
+    }
+
+    /** A resolution failure leaves the pin with nothing to match, which refuses like any other mismatch. */
+    private suspend fun resolveAddresses(host: String): List<String> = withContext(Dispatchers.IO) {
+        try {
+            InetAddress.getAllByName(host).mapNotNull { it.hostAddress }
+        } catch (e: UnknownHostException) {
+            emptyList()
         }
     }
 
