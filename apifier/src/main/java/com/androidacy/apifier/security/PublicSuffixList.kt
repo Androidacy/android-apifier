@@ -112,12 +112,23 @@ class PublicSuffixList(rules: Sequence<String>) {
     }
 
     companion object {
-        /** Loads the bundled list from `R.raw.public_suffix_list`. */
+        @Volatile
+        private var cached: PublicSuffixList? = null
+
+        /**
+         * Loads the bundled list from `R.raw.public_suffix_list`, parsing it once per process.
+         * Every client shares the result; the bundled resource cannot differ between callers
+         * in the same process, so the parse does not need to key off [context].
+         */
         fun load(context: Context): PublicSuffixList {
-            val lines = context.resources.openRawResource(R.raw.public_suffix_list)
-                .bufferedReader()
-                .use { it.readLines() }
-            return PublicSuffixList(lines.asSequence())
+            cached?.let { return it }
+            synchronized(this) {
+                cached?.let { return it }
+                val lines = context.resources.openRawResource(R.raw.public_suffix_list)
+                    .bufferedReader()
+                    .use { it.readLines() }
+                return PublicSuffixList(lines.asSequence()).also { cached = it }
+            }
         }
     }
 }

@@ -26,13 +26,11 @@ import com.androidacy.apifier.http.Cookie
 import com.androidacy.apifier.http.CookieJar
 import org.json.JSONObject
 import java.security.KeyStore
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import kotlin.concurrent.read
 import kotlin.concurrent.write
 
 /**
@@ -40,95 +38,138 @@ import kotlin.concurrent.write
  * AES-GCM encrypted via Android Keystore, Base64-encoded, and written to [storage]; a session
  * cookie (RFC 6265 s5.3 step 3) lives only in the decoded cache for this instance's lifetime.
  */
-class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
+class SecureCookieJar(
+    private val storage: CookieStorage,
+    private val publicSuffixList: PublicSuffixList
+) : CookieJar {
 
     private val secretKey: SecretKey? = loadOrCreateKey()
 
-    // Write-through cache of decoded cookies keyed by domain. The hot request path
-    // (loadForRequest, once per request) would otherwise re-decrypt every cookie of
-    // every domain, a Keystore binder IPC each. Reads take the shared read lock so
-    // concurrent requests no longer serialize; writes (saveFromResponse) take the
-    // write lock and refresh the affected domain, so the consumer's CookieStorage is
-    // never touched by a read and a write at the same time.
-    private val decodedCache = ConcurrentHashMap<String, List<Cookie>>()
+    // Write-through cache of decoded cookies keyed by domain, bounded so a client that talks
+    // to many hosts over its lifetime cannot grow one entry per host forever. loadForRequest
+    // (once per request) would otherwise re-decrypt every cookie of every domain, a Keystore
+    // binder IPC each.
+    private val decodedCache = DecodedDomainCache()
+
+    // Guards only the read-merge-write across storage, the shared domain index and the rare
+    // prune-on-visit path, all of which need atomicity against a concurrent save. loadForRequest
+    // takes no lock: decodedCache synchronizes itself and a plain storage read needs no
+    // exclusivity, so a save no longer blocks every concurrent load for hosts it isn't touching.
     private val lock = ReentrantReadWriteLock()
 
-    override fun loadForRequest(uri: Uri): List<Cookie> = lock.read {
+    override fun loadForRequest(uri: Uri): List<Cookie> {
+        val host = uri.host?.lowercase() ?: return emptyList()
+        val registrable = registrableDomainOf(host)
         val now = System.currentTimeMillis()
         val result = mutableListOf<Cookie>()
+        val expiredDomains = mutableListOf<String>()
 
-        // Session cookies live only in decodedCache under a domain the storage index was
-        // never told about, so the domain set to scan has to include both.
-        for (domain in getStoredDomains() + decodedCache.keys) {
-            val cookies = decodedCache.computeIfAbsent(domain) { d ->
-                storage.getStringSet(domainKey(d), null)
-                    ?.mapNotNull { encoded -> runCatching { decode(encoded) }.getOrNull() }
-                    ?: emptyList()
+        for (domain in candidateDomains(registrable)) {
+            val cookies = decodedCache.get(domain) ?: loadDomain(domain)
+            val valid = cookies.filter { it.expiresAt > now }
+            if (valid.isEmpty()) {
+                expiredDomains.add(domain)
+                continue
             }
-
-            for (cookie in cookies) {
-                if (cookie.expiresAt <= now) continue
-                if (!cookie.matches(uri)) continue
-                result.add(cookie)
-            }
+            for (cookie in valid) if (cookie.matches(uri)) result.add(cookie)
         }
-        result
+
+        if (expiredDomains.isNotEmpty()) {
+            lock.write { for (domain in expiredDomains) pruneIfStillExpired(domain, now) }
+        }
+        return result
     }
 
     override fun saveFromResponse(uri: Uri, cookies: List<Cookie>) = lock.write {
         if (cookies.isEmpty()) return@write
 
         val now = System.currentTimeMillis()
-        val domainsChanged = mutableSetOf<String>()
+        val addedDomains = mutableSetOf<String>()
+        val removedDomains = mutableSetOf<String>()
 
         for (cookie in cookies) {
             val domain = cookie.domain
-            domainsChanged.add(domain)
 
             val stored = storage.getStringSet(domainKey(domain), null)
                 ?.mapNotNull { encoded -> runCatching { decode(encoded) }.getOrNull() }
                 ?: emptyList()
             // A session cookie already held for this domain lives only in decodedCache, never
             // in storage, so both have to feed the merge or an overwrite would drop it.
-            val existing = (stored + (decodedCache[domain] ?: emptyList()))
+            val existing = (stored + (decodedCache.get(domain) ?: emptyList()))
                 .associateBy { it.name to it.path }
                 .toMutableMap()
 
             existing[cookie.name to cookie.path] = cookie
 
             val validCookies = existing.values.filter { it.expiresAt > now }
-            decodedCache[domain] = validCookies
+            decodedCache.put(domain, validCookies)
 
             val persistentCookies = validCookies.filter { it.persistent }
             val encoded = persistentCookies.mapNotNull { encode(it) }.toSet()
 
+            // encoded.isNotEmpty() already answers whether this domain still has stored
+            // cookies; re-reading storage to ask the same question again would be a round
+            // trip for nothing.
             if (encoded.isNotEmpty()) {
                 storage.putStringSet(domainKey(domain), encoded)
+                addedDomains.add(domain)
+                removedDomains.remove(domain)
             } else {
                 storage.remove(domainKey(domain))
+                removedDomains.add(domain)
+                addedDomains.remove(domain)
             }
             if (validCookies.isEmpty()) decodedCache.remove(domain)
         }
 
-        // Update domain index: prune domains whose storage was cleared
-        val allDomains = getStoredDomains().toMutableSet()
-        for (domain in domainsChanged) {
-            if (storage.getStringSet(domainKey(domain), null).isNullOrEmpty()) {
-                allDomains.remove(domain)
-            } else {
-                allDomains.add(domain)
-            }
+        if (addedDomains.isNotEmpty() || removedDomains.isNotEmpty()) {
+            val allDomains = getStoredDomains().toMutableSet()
+            allDomains.addAll(addedDomains)
+            allDomains.removeAll(removedDomains)
+            storage.putStringSet(DOMAIN_INDEX_KEY, allDomains)
         }
-        storage.putStringSet(DOMAIN_INDEX_KEY, allDomains)
     }
 
     override fun clear() = lock.write {
-        for (domain in getStoredDomains() + decodedCache.keys) {
+        for (domain in getStoredDomains() + decodedCache.keys()) {
             storage.remove(domainKey(domain))
         }
         storage.remove(DOMAIN_INDEX_KEY)
         decodedCache.clear()
     }
+
+    /** Loads and caches [domain]'s cookies from storage; called outside [lock]. */
+    private fun loadDomain(domain: String): List<Cookie> {
+        val decoded = storage.getStringSet(domainKey(domain), null)
+            ?.mapNotNull { encoded -> runCatching { decode(encoded) }.getOrNull() }
+            ?: emptyList()
+        decodedCache.put(domain, decoded)
+        return decoded
+    }
+
+    /**
+     * Removes [domain] from storage, the index and the cache, but only if it is still fully
+     * expired under [lock]: a concurrent [saveFromResponse] could have refreshed it between
+     * [loadForRequest]'s unlocked scan and this call.
+     */
+    private fun pruneIfStillExpired(domain: String, now: Long) {
+        val current = decodedCache.get(domain) ?: loadDomain(domain)
+        if (current.any { it.expiresAt > now }) return
+        decodedCache.remove(domain)
+        storage.remove(domainKey(domain))
+        val domains = getStoredDomains()
+        if (domain in domains) storage.putStringSet(DOMAIN_INDEX_KEY, domains - domain)
+    }
+
+    // decodedCache.keys() covers session cookies, which never enter the storage index.
+    private fun candidateDomains(registrable: String): List<String> {
+        val fromIndex = getStoredDomains().asSequence().filter { registrableDomainOf(it) == registrable }
+        val fromCache = decodedCache.keys().asSequence().filter { registrableDomainOf(it) == registrable }
+        return (fromIndex + fromCache).distinct().toList()
+    }
+
+    private fun registrableDomainOf(domain: String): String =
+        publicSuffixList.effectiveTldPlusOne(domain) ?: domain
 
     private fun getStoredDomains(): Set<String> =
         storage.getStringSet(DOMAIN_INDEX_KEY, null) ?: emptySet()
@@ -302,5 +343,33 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
         private const val AES_GCM_TRANSFORM = "AES/GCM/NoPadding"
         private const val GCM_TAG_LENGTH = 128
         private const val FORMAT_VERSION = 1
+    }
+}
+
+/**
+ * Bounded, access-ordered cache of decoded cookies keyed by domain, evicting the least recently
+ * used entry past [maxDomains]. Same shape as `com.androidacy.apifier.client.BreakerRegistry`:
+ * a domain evicted here is not lost, only its decode -- the next visit re-reads and re-decrypts it
+ * from [SecureCookieJar]'s storage.
+ */
+private class DecodedDomainCache(private val maxDomains: Int = MAX_CACHED_DOMAINS) {
+
+    private val cache = object : LinkedHashMap<String, List<Cookie>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<Cookie>>): Boolean =
+            size > maxDomains
+    }
+
+    fun get(domain: String): List<Cookie>? = synchronized(cache) { cache[domain] }
+
+    fun put(domain: String, cookies: List<Cookie>) = synchronized(cache) { cache[domain] = cookies }
+
+    fun remove(domain: String) = synchronized(cache) { cache.remove(domain) }
+
+    fun keys(): Set<String> = synchronized(cache) { LinkedHashSet(cache.keys) }
+
+    fun clear() = synchronized(cache) { cache.clear() }
+
+    private companion object {
+        const val MAX_CACHED_DOMAINS = 64
     }
 }

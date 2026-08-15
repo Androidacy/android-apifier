@@ -19,6 +19,7 @@ import android.net.Uri
 import android.util.Base64
 import com.androidacy.apifier.http.Cookie
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -38,16 +39,23 @@ class SecureCookieJarTest {
 
     private lateinit var storage: InMemoryCookieStorage
     private lateinit var jar: SecureCookieJar
+    private lateinit var key: javax.crypto.SecretKey
+    private val psl = PublicSuffixList(sequenceOf("com", "org", "net"))
 
     @Before
     fun setUp() {
         storage = InMemoryCookieStorage()
-        jar = SecureCookieJar(storage)
+        key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+        jar = newJar(storage)
+    }
 
-        val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+    /** Off-device there is no AndroidKeyStore, so [SecureCookieJar]'s key is seeded by reflection. */
+    private fun newJar(backing: CookieStorage): SecureCookieJar {
+        val newJar = SecureCookieJar(backing, psl)
         val field = SecureCookieJar::class.java.getDeclaredField("secretKey")
         field.isAccessible = true
-        field.set(jar, key)
+        field.set(newJar, key)
+        return newJar
     }
 
     private fun cookie(
@@ -306,6 +314,88 @@ class SecureCookieJarTest {
         assertTrue(loaded.any { it.name == "session" && it.value == "A" })
     }
 
+    @Test
+    fun loadForRequestOnlyVisitsDomainsThatCouldMatch() {
+        val future = System.currentTimeMillis() + 60_000L
+        val counting = CountingCookieStorage(InMemoryCookieStorage())
+        val seedJar = newJar(counting)
+        seedJar.saveFromResponse(url("https://example.com/"), listOf(cookie("a", "1", domain = "example.com", expiresAt = future)))
+        seedJar.saveFromResponse(url("https://other.org/"), listOf(cookie("b", "2", domain = "other.org", expiresAt = future)))
+        seedJar.saveFromResponse(url("https://third.net/"), listOf(cookie("c", "3", domain = "third.net", expiresAt = future)))
+
+        // A fresh jar over the same storage has an empty decoded cache, so any domain
+        // loadForRequest touches shows up as a storage read.
+        counting.calls.clear()
+        val freshJar = newJar(counting)
+        freshJar.loadForRequest(url("https://example.com/"))
+
+        val cookieDataReads = counting.calls.filter { it.op == "get" && it.key.startsWith("cookies_") }.map { it.key }
+        assertEquals(setOf("cookies_example.com"), cookieDataReads.toSet())
+    }
+
+    @Test
+    fun expiredDomainsArePrunedFromStorageAndTheIndex() {
+        val past = System.currentTimeMillis() - 60_000L
+        val expired = cookie("session", "A", domain = "example.com", expiresAt = past)
+        storage.putStringSet("cookies_example.com", setOf(encodeWithJarKey(expired)))
+        storage.putStringSet("_cookie_domains", setOf("example.com"))
+
+        val loaded = jar.loadForRequest(url("https://example.com/"))
+
+        assertTrue(loaded.isEmpty())
+        assertNull(storage.getStringSet("cookies_example.com", null))
+        assertFalse(storage.getStringSet("_cookie_domains", null).orEmpty().contains("example.com"))
+    }
+
+    @Test
+    fun theDecodedCacheIsBoundedAndEvictsEldest() {
+        val future = System.currentTimeMillis() + 60_000L
+        val counting = CountingCookieStorage(InMemoryCookieStorage())
+        val cachingJar = newJar(counting)
+
+        // One save per domain puts it in the decoded cache; MAX_CACHED_DOMAINS (64) is the
+        // production cap, so the 65th put evicts domain0.com, the least recently touched.
+        for (i in 0..64) {
+            val domain = "domain$i.com"
+            cachingJar.saveFromResponse(
+                url("https://$domain/"),
+                listOf(cookie("s", "v", domain = domain, expiresAt = future)),
+            )
+        }
+
+        counting.calls.clear()
+        cachingJar.loadForRequest(url("https://domain0.com/"))
+        cachingJar.loadForRequest(url("https://domain64.com/"))
+
+        val reads = counting.calls.filter { it.op == "get" }.map { it.key }
+        assertTrue("evicted domain0.com must be re-read from storage", "cookies_domain0.com" in reads)
+        assertFalse("still-cached domain64.com must not need a storage read", "cookies_domain64.com" in reads)
+    }
+
+    @Test
+    fun savingDoesNotReReadWhatItJustWrote() {
+        val future = System.currentTimeMillis() + 60_000L
+        val counting = CountingCookieStorage(InMemoryCookieStorage())
+        val countingJar = newJar(counting)
+
+        counting.calls.clear()
+        countingJar.saveFromResponse(
+            url("https://example.com/"),
+            listOf(cookie("session", "A", domain = "example.com", expiresAt = future)),
+        )
+
+        // read domainKey, write domainKey, read index, write index -- no repeat read of the
+        // domainKey this save already wrote.
+        assertEquals(4, counting.calls.size)
+    }
+
+    /** Encrypts [cookie] exactly as [jar] would persist it, without going through its expiry filter. */
+    private fun encodeWithJarKey(cookie: Cookie): String {
+        val method = SecureCookieJar::class.java.getDeclaredMethod("encode", Cookie::class.java)
+            .apply { isAccessible = true }
+        return method.invoke(jar, cookie) as String
+    }
+
     /** Decrypts [encoded] under the jar's current-version framing, for schema-pin assertions. */
     private fun decryptWithJarKey(encoded: String): org.json.JSONObject {
         val secretKey = SecureCookieJar::class.java.getDeclaredField("secretKey")
@@ -320,5 +410,28 @@ class SecureCookieJarTest {
         )
         val plaintext = cipher.doFinal(raw.copyOfRange(2 + ivLen, raw.size))
         return org.json.JSONObject(String(plaintext, Charsets.UTF_8))
+    }
+}
+
+/** Records every call [SecureCookieJar] makes against [delegate], for round-trip-count assertions. */
+private class CountingCookieStorage(private val delegate: CookieStorage) : CookieStorage {
+
+    data class Call(val op: String, val key: String)
+
+    val calls = mutableListOf<Call>()
+
+    override fun getStringSet(key: String, defaultValue: Set<String>?): Set<String>? {
+        calls.add(Call("get", key))
+        return delegate.getStringSet(key, defaultValue)
+    }
+
+    override fun putStringSet(key: String, value: Set<String>) {
+        calls.add(Call("put", key))
+        delegate.putStringSet(key, value)
+    }
+
+    override fun remove(key: String) {
+        calls.add(Call("remove", key))
+        delegate.remove(key)
     }
 }

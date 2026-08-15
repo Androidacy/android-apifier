@@ -177,12 +177,13 @@ class ApifierClient internal constructor(
     private val observation = Observation()
 
     private val pipeline: Pipeline = run {
-        val cookieJar = config.cookieStorage?.let(::SecureCookieJar)
+        val publicSuffixList = config.cookieStorage?.let { PublicSuffixList.load(appContext) }
+        val cookieJar = config.cookieStorage?.let { SecureCookieJar(it, publicSuffixList!!) }
         Pipeline(
             engine::newCall,
             config,
             cookieJar,
-            if (cookieJar == null) null else PublicSuffixList.load(appContext),
+            publicSuffixList,
             qualification,
             BreakerRegistry(config.circuitBreakerConfig),
             scheduler,

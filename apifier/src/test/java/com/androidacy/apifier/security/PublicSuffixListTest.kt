@@ -121,4 +121,14 @@ class PublicSuffixListTest {
         assertTrue(psl.isPublicSuffix("co.uk"))
         assertTrue(psl.isPublicSuffix("github.io"))
     }
+
+    @Test
+    fun theSuffixListIsParsedOnceAcrossClients() {
+        val context: android.content.Context = ApplicationProvider.getApplicationContext()
+
+        val first = PublicSuffixList.load(context)
+        val second = PublicSuffixList.load(context)
+
+        assertTrue(first === second)
+    }
 }

@@ -84,3 +84,7 @@
 - `ApifierClient.clearCookies()` drops every cookie the client holds, in memory and in storage.
   Call it on logout. `CookieJar.clear()` is a new interface member with a no-op default, so a
   custom `CookieJar` you already wrote keeps compiling.
+- `SecureCookieJar`'s constructor now takes a `PublicSuffixList` alongside your `CookieStorage`.
+  `ApifierClient` builds this for you; only a caller constructing `SecureCookieJar` directly needs
+  to pass one, with `PublicSuffixList.load(context)`. Cookies already in your `CookieStorage` load
+  the same as before; nothing about what is persisted changes.
