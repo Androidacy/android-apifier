@@ -55,7 +55,7 @@ internal object ResponseAssembly {
         val contentLength = if (decoded || bodyless) {
             -1L
         } else {
-            valuesOf(headers, "Content-Length").lastOrNull()?.toLongOrNull() ?: -1L
+            valuesOf(headers, "Content-Length").lastOrNull()?.toLongOrNull()?.takeIf { it >= 0 } ?: -1L
         }
 
         val outHeaders = if (decoded) {

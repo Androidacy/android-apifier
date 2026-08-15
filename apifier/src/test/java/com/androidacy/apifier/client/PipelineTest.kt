@@ -74,6 +74,7 @@ import java.security.KeyStore
 import java.security.cert.X509Certificate
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -379,6 +380,21 @@ class PipelineTest {
         dispatcher.close()
     }
 
+    /**
+     * gateTrust reads `now` again and subtracts it from the deadline, which cancels out any
+     * overflow from the addition under a monotonic clock; the saturation is only observable at
+     * the deadline value itself, which an absolute expiry check (unlike gateTrust's subtraction)
+     * would depend on directly.
+     */
+    @Test
+    fun anEffectivelyUnboundedCallBudgetStillWaitsForTheTrustVerdict() {
+        val now = System.currentTimeMillis()
+
+        val deadlineAt = saturatingDeadline(now, Long.MAX_VALUE)
+
+        assertTrue("an overflowed deadline must not read as already expired", deadlineAt > now)
+    }
+
     @Test
     fun circuitOpenShortCircuits() {
         val transport = FakeTransport(listOf(step { ok(it) }))
@@ -559,6 +575,31 @@ class PipelineTest {
 
         assertTrue("a body still in hand leaves the budget armed", streaming.isTimedOut)
         assertFalse("closing the body disarms the budget", closed.isTimedOut)
+    }
+
+    /**
+     * Two racing callers reading a plain memoization field can each observe it unset and build
+     * their own wrapper, splitting the underlying source between two owners.
+     */
+    @Test
+    fun concurrentSourceAccessReturnsOneWrapper() {
+        val transport = FakeTransport(listOf(step { ok(it) }))
+        val pipeline = pipelineOf(transport, config())
+        val response = pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall())
+        val body = response.body
+
+        val barrier = CyclicBarrier(2)
+        val results = arrayOfNulls<BufferedSource>(2)
+        val readers = (0 until 2).map { i ->
+            thread {
+                barrier.await()
+                results[i] = body.source()
+            }
+        }
+        readers.forEach { it.join() }
+
+        assertSame(results[0], results[1])
+        response.close()
     }
 
     /** Production changes that fail this: dropping the settle from the timeout task, or settling it unguarded. */

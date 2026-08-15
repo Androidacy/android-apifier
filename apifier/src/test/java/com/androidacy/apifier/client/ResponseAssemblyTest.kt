@@ -172,4 +172,16 @@ class ResponseAssemblyTest {
         assertEquals(-1L, assembled.contentLength)
         assertEquals(null, assembled.contentType)
     }
+
+    @Test
+    fun aNegativeContentLengthIsReportedAsUnknown() {
+        val assembled = ResponseAssembly.assemble(
+            headers = listOf("Content-Length" to "-5"),
+            statusCode = 200,
+            negotiatedProtocol = "h2",
+            method = "GET"
+        )
+
+        assertEquals(-1L, assembled.contentLength)
+    }
 }

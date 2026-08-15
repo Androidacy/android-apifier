@@ -95,6 +95,10 @@ internal fun interface AttemptTransport {
     fun newCall(request: Request, listener: TransportListener?): AttemptCall
 }
 
+/** `now + timeoutMs` for an effectively unbounded budget; saturates instead of wrapping negative. */
+internal fun saturatingDeadline(now: Long, timeoutMs: Long): Long =
+    if (timeoutMs > Long.MAX_VALUE - now) Long.MAX_VALUE else now + timeoutMs
+
 /**
  * Per-host circuit breakers, bounded and access-ordered so a client that reaches many hosts
  * cannot grow one entry per host forever.
@@ -197,7 +201,7 @@ internal class Pipeline(
     suspend fun execute(request: Request, options: CallOptions, call: PipelineCall): Response {
         val host = checkNotNull(request.uri.host) { "request has no host" }
         val timeoutMs = options.callTimeoutMillis ?: config.timeouts.call.inWholeMilliseconds
-        val deadlineAt = System.currentTimeMillis() + timeoutMs
+        val deadlineAt = saturatingDeadline(System.currentTimeMillis(), timeoutMs)
         val callStartNanos = System.nanoTime()
         val timeoutTask = scheduler.schedule(
             {
@@ -592,17 +596,17 @@ private class BudgetedBody(
     private val timeoutMillis: Long
 ) : ResponseBody() {
 
-    private var bounded: BufferedSource? = null
+    // Built eagerly, not memoized on first source() call: a lazily-created wrapper race would let
+    // two callers each start buffering the same underlying source, silently splitting its bytes.
+    @Suppress("DEPRECATION")
+    private val bounded = bounding(body.source()).buffer()
 
     override fun contentType(): MediaType? = body.contentType()
 
     override fun contentLength(): Long = body.contentLength()
 
     @Suppress("OVERRIDE_DEPRECATION")
-    override fun source(): BufferedSource {
-        @Suppress("DEPRECATION")
-        return bounded ?: bounding(body.source()).buffer().also { bounded = it }
-    }
+    override fun source(): BufferedSource = bounded
 
     override fun close() {
         disarm()
@@ -637,7 +641,10 @@ internal class ProgressBody(
     private val progressSink: MutableSharedFlow<Progress>
 ) : ResponseBody() {
 
-    private var counted: BufferedSource? = null
+    // Built eagerly for the same reason as BudgetedBody.bounded: a lazy race would let two
+    // callers each buffer the same underlying source.
+    @Suppress("DEPRECATION")
+    private val counted = counting(body.source()).buffer()
     private val totalRead = AtomicLong(0L)
     private val lastReported = AtomicLong(-1L)
     private val eofReported = AtomicBoolean(false)
@@ -647,10 +654,7 @@ internal class ProgressBody(
     override fun contentLength(): Long = body.contentLength()
 
     @Suppress("OVERRIDE_DEPRECATION")
-    override fun source(): BufferedSource {
-        @Suppress("DEPRECATION")
-        return counted ?: counting(body.source()).buffer().also { counted = it }
-    }
+    override fun source(): BufferedSource = counted
 
     private fun counting(source: Source): Source = object : ForwardingSource(source) {
         override fun read(sink: Buffer, byteCount: Long): Long {
