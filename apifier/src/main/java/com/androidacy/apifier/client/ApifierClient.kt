@@ -218,6 +218,12 @@ class ApifierClient internal constructor(
         DerivedRequester(this, CallOptions(headers = Headers.Builder().set(name, value).build()))
 
     /**
+     * Drops every cookie this client holds: session cookies from memory and persisted ones from
+     * [NetworkConfig.cookieStorage]. A no-op when the client was built without cookie storage.
+     */
+    fun clearCookies() = pipeline.clearCookies()
+
+    /**
      * The call every [Requester] on this client ends up in. The call counts as in flight until
      * the pipeline fails or its response body ends, which is what [close] has to reach: the
      * engine stays active for as long as a body is streaming.

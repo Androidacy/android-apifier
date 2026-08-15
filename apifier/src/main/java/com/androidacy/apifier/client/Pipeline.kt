@@ -201,6 +201,11 @@ internal class Pipeline(
         if (config.logRequests) observation.addObserver(LoggingObserver())
     }
 
+    /** No-op when the client was built without a [CookieJar]. */
+    fun clearCookies() {
+        cookieJar?.clear()
+    }
+
     suspend fun execute(request: Request, options: CallOptions, call: PipelineCall): Response {
         val host = checkNotNull(request.uri.host) { "request has no host" }
         val timeoutMs = options.callTimeoutMillis ?: config.timeouts.call.inWholeMilliseconds

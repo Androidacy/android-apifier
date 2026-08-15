@@ -966,6 +966,22 @@ class ApifierClientTest {
     }
 
     @Test
+    fun clearCookiesOnTheClientDropsSessionCookies() {
+        val engine = FakeEngine(respond = { request ->
+            response(request, headers = Headers.headersOf("Set-Cookie", "sid=abc"))
+        })
+        val client = clientOf(engine, NetworkConfig(cookieStorage = InMemoryCookieStorage()))
+
+        runBlocking { client.get(URL).close() }
+        client.clearCookies()
+        runBlocking { client.get(URL).close() }
+
+        val requestAfterClear = engine.seen.last()
+        assertNull("the session cookie held in memory should have been cleared", requestAfterClear.header("Cookie"))
+        client.close()
+    }
+
+    @Test
     fun javaTimeoutOverloadMatchesTheDurationForm() {
         val client = clientOf(FakeEngine(hang = true))
 

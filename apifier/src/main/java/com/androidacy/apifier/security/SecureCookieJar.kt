@@ -35,7 +35,11 @@ import javax.crypto.spec.GCMParameterSpec
 import kotlin.concurrent.read
 import kotlin.concurrent.write
 
-/** [CookieJar] backed by a [CookieStorage]. Cookies are JSON-serialized, AES-GCM encrypted via Android Keystore, and Base64-encoded. */
+/**
+ * [CookieJar] backed by a [CookieStorage]. A [Cookie.persistent] cookie is JSON-serialized,
+ * AES-GCM encrypted via Android Keystore, Base64-encoded, and written to [storage]; a session
+ * cookie (RFC 6265 s5.3 step 3) lives only in the decoded cache for this instance's lifetime.
+ */
 class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
 
     private val secretKey: SecretKey? = loadOrCreateKey()
@@ -53,8 +57,9 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
         val now = System.currentTimeMillis()
         val result = mutableListOf<Cookie>()
 
-        // Check all stored domains for cookies that match this URL
-        for (domain in getStoredDomains()) {
+        // Session cookies live only in decodedCache under a domain the storage index was
+        // never told about, so the domain set to scan has to include both.
+        for (domain in getStoredDomains() + decodedCache.keys) {
             val cookies = decodedCache.computeIfAbsent(domain) { d ->
                 storage.getStringSet(domainKey(d), null)
                     ?.mapNotNull { encoded -> runCatching { decode(encoded) }.getOrNull() }
@@ -80,23 +85,29 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
             val domain = cookie.domain
             domainsChanged.add(domain)
 
-            val existing = storage.getStringSet(domainKey(domain), null)
+            val stored = storage.getStringSet(domainKey(domain), null)
                 ?.mapNotNull { encoded -> runCatching { decode(encoded) }.getOrNull() }
-                ?.associateBy { it.name to it.path }
-                ?.toMutableMap() ?: mutableMapOf()
+                ?: emptyList()
+            // A session cookie already held for this domain lives only in decodedCache, never
+            // in storage, so both have to feed the merge or an overwrite would drop it.
+            val existing = (stored + (decodedCache[domain] ?: emptyList()))
+                .associateBy { it.name to it.path }
+                .toMutableMap()
 
             existing[cookie.name to cookie.path] = cookie
 
             val validCookies = existing.values.filter { it.expiresAt > now }
-            val encoded = validCookies.mapNotNull { encode(it) }.toSet()
+            decodedCache[domain] = validCookies
+
+            val persistentCookies = validCookies.filter { it.persistent }
+            val encoded = persistentCookies.mapNotNull { encode(it) }.toSet()
 
             if (encoded.isNotEmpty()) {
                 storage.putStringSet(domainKey(domain), encoded)
-                decodedCache[domain] = validCookies
             } else {
                 storage.remove(domainKey(domain))
-                decodedCache.remove(domain)
             }
+            if (validCookies.isEmpty()) decodedCache.remove(domain)
         }
 
         // Update domain index: prune domains whose storage was cleared
@@ -109,6 +120,14 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
             }
         }
         storage.putStringSet(DOMAIN_INDEX_KEY, allDomains)
+    }
+
+    override fun clear() = lock.write {
+        for (domain in getStoredDomains() + decodedCache.keys) {
+            storage.remove(domainKey(domain))
+        }
+        storage.remove(DOMAIN_INDEX_KEY)
+        decodedCache.clear()
     }
 
     private fun getStoredDomains(): Set<String> =
@@ -143,6 +162,9 @@ class SecureCookieJar(private val storage: CookieStorage) : CookieJar {
             .domain(json.getString("d"))
             .path(json.getString("p"))
             .expiresAt(json.getLong("e"))
+            // Only a persistent cookie is ever written to storage, so anything decoded from
+            // here is persistent by construction; the flag itself is not part of the schema.
+            .persistent()
             .apply {
                 if (json.optBoolean("s")) secure()
                 if (json.optBoolean("h")) httpOnly()

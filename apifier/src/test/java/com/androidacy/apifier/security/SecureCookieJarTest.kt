@@ -56,12 +56,14 @@ class SecureCookieJarTest {
         domain: String,
         path: String = "/",
         expiresAt: Long,
+        persistent: Boolean = true,
     ): Cookie = Cookie.Builder()
         .name(name)
         .value(value)
         .domain(domain)
         .path(path)
         .expiresAt(expiresAt)
+        .apply { if (persistent) persistent() }
         .build()
 
     private fun url(spec: String): Uri = Uri.parse(spec)
@@ -138,6 +140,64 @@ class SecureCookieJarTest {
 
         jar.saveFromResponse(target, listOf(cookie("session", "B", domain = "example.com", expiresAt = future)))
         assertEquals("B", jar.loadForRequest(target).single { it.name == "session" }.value)
+    }
+
+    @Test
+    fun aSessionCookieIsNotWrittenToStorage() {
+        val cookie = cookie("session", "A", domain = "example.com", expiresAt = Long.MAX_VALUE, persistent = false)
+        val target = url("https://example.com/")
+
+        jar.saveFromResponse(target, listOf(cookie))
+
+        assertNull(storage.getStringSet("cookies_example.com", null))
+    }
+
+    @Test
+    fun aSessionCookieIsStillSentOnALaterRequest() {
+        val cookie = cookie("session", "A", domain = "example.com", expiresAt = Long.MAX_VALUE, persistent = false)
+        val target = url("https://example.com/")
+
+        jar.saveFromResponse(target, listOf(cookie))
+
+        assertTrue(jar.loadForRequest(target).any { it.name == "session" && it.value == "A" })
+    }
+
+    @Test
+    fun aPersistentCookieIsStillWritten() {
+        val future = System.currentTimeMillis() + 60_000L
+        val cookie = cookie("session", "A", domain = "example.com", expiresAt = future, persistent = true)
+        val target = url("https://example.com/")
+
+        jar.saveFromResponse(target, listOf(cookie))
+
+        assertEquals(1, storage.getStringSet("cookies_example.com", null)?.size)
+    }
+
+    @Test
+    fun clearRemovesEveryStoredCookie() {
+        val future = System.currentTimeMillis() + 60_000L
+        val persistentCookie = cookie("persistent", "A", domain = "example.com", expiresAt = future, persistent = true)
+        val sessionCookie = cookie("session", "B", domain = "other.com", expiresAt = Long.MAX_VALUE, persistent = false)
+        jar.saveFromResponse(url("https://example.com/"), listOf(persistentCookie))
+        jar.saveFromResponse(url("https://other.com/"), listOf(sessionCookie))
+
+        jar.clear()
+
+        assertTrue(jar.loadForRequest(url("https://example.com/")).isEmpty())
+        assertTrue(jar.loadForRequest(url("https://other.com/")).isEmpty())
+        assertNull(storage.getStringSet("cookies_example.com", null))
+        assertNull(storage.getStringSet("cookies_other.com", null))
+    }
+
+    @Test
+    fun clearRemovesTheDomainIndex() {
+        val future = System.currentTimeMillis() + 60_000L
+        val persistentCookie = cookie("persistent", "A", domain = "example.com", expiresAt = future, persistent = true)
+        jar.saveFromResponse(url("https://example.com/"), listOf(persistentCookie))
+
+        jar.clear()
+
+        assertNull(storage.getStringSet("_cookie_domains", null))
     }
 
     @Test

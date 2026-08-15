@@ -75,3 +75,12 @@
   host-independent resolver qualification, and `hostIpPins { ... }` covers a host whose expected
   addresses you already know; see the README's
   [Resolver Qualification](README.md#resolver-qualification) section.
+
+### Cookies
+
+- A `Set-Cookie` with neither `Expires` nor `Max-Age` is now a session cookie: held in memory for
+  the client's lifetime and never written to your `CookieStorage`. `Cookie.persistent` tells the
+  two apart. Existing persisted cookies are unaffected and keep loading as before.
+- `ApifierClient.clearCookies()` drops every cookie the client holds, in memory and in storage.
+  Call it on logout. `CookieJar.clear()` is a new interface member with a no-op default, so a
+  custom `CookieJar` you already wrote keeps compiling.

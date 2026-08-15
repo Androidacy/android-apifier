@@ -79,6 +79,38 @@ class CookieTest {
     }
 
     @Test
+    fun aCookieWithNoExpiryIsNotPersistent() {
+        val cookie = Cookie.parse(Uri.parse("https://example.com/"), "sid=abc", psl)!!
+
+        assertFalse(cookie.persistent)
+    }
+
+    @Test
+    fun aCookieWithMaxAgeIsPersistent() {
+        val cookie = Cookie.parse(Uri.parse("https://example.com/"), "sid=abc; Max-Age=3600", psl)!!
+
+        assertTrue(cookie.persistent)
+    }
+
+    @Test
+    fun aCookieWithExpiresIsPersistent() {
+        val cookie = Cookie.parse(
+            Uri.parse("https://example.com/"),
+            "sid=abc; Expires=Wed, 21 Oct 2015 07:28:00 GMT",
+            psl,
+        )!!
+
+        assertTrue(cookie.persistent)
+    }
+
+    @Test
+    fun anUnparseableExpiresLeavesTheCookieNotPersistent() {
+        val cookie = Cookie.parse(Uri.parse("https://example.com/"), "sid=abc; Expires=not-a-date", psl)!!
+
+        assertFalse(cookie.persistent)
+    }
+
+    @Test
     fun domainAttributeMustMatchRequestHost() {
         val result = Cookie.parse(Uri.parse("https://example.com/"), "sid=a; Domain=other.com", psl)
 

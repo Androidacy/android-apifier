@@ -34,6 +34,8 @@ class Cookie private constructor(
     val secure: Boolean,
     val httpOnly: Boolean,
     val hostOnly: Boolean,
+    /** RFC 6265 s5.3 step 3: true only when the `Set-Cookie` carried `Expires` or `Max-Age`. */
+    val persistent: Boolean,
 ) {
 
     /**
@@ -58,6 +60,7 @@ class Cookie private constructor(
         private var secure: Boolean = false
         private var httpOnly: Boolean = false
         private var hostOnly: Boolean = false
+        private var persistent: Boolean = false
 
         fun name(name: String): Builder = apply { this.name = name }
 
@@ -83,6 +86,9 @@ class Cookie private constructor(
 
         fun httpOnly(): Builder = apply { this.httpOnly = true }
 
+        /** Marks this cookie for storage beyond the jar's lifetime, per [Cookie.persistent]. */
+        fun persistent(): Builder = apply { this.persistent = true }
+
         fun build(): Cookie = Cookie(
             name = checkNotNull(name) { "name == null" },
             value = checkNotNull(value) { "value == null" },
@@ -92,6 +98,7 @@ class Cookie private constructor(
             secure = secure,
             httpOnly = httpOnly,
             hostOnly = hostOnly,
+            persistent = persistent,
         )
     }
 
@@ -130,6 +137,7 @@ class Cookie private constructor(
 
             var expiresAt = Long.MAX_VALUE
             var maxAgeSet = false
+            var persistent = false
             var domainAttr: String? = null
             var pathAttr: String? = null
             var secure = false
@@ -145,10 +153,11 @@ class Cookie private constructor(
                     attrName.equals("max-age", ignoreCase = true) -> {
                         val seconds = attrValue.toLongOrNull() ?: continue
                         maxAgeSet = true
+                        persistent = true
                         expiresAt = if (seconds <= 0) 0L else now + seconds.coerceAtMost(MAX_AGE_CAP_SECONDS) * 1000
                     }
                     attrName.equals("expires", ignoreCase = true) && !maxAgeSet ->
-                        parseExpires(attrValue)?.let { expiresAt = it }
+                        parseExpires(attrValue)?.let { expiresAt = it; persistent = true }
                     attrName.equals("domain", ignoreCase = true) -> domainAttr = attrValue
                     attrName.equals("path", ignoreCase = true) -> pathAttr = attrValue
                     attrName.equals("secure", ignoreCase = true) -> secure = true
@@ -189,6 +198,7 @@ class Cookie private constructor(
             if (hostOnly) builder.hostOnlyDomain(cookieDomain) else builder.domain(cookieDomain)
             if (secure) builder.secure()
             if (httpOnly) builder.httpOnly()
+            if (persistent) builder.persistent()
             return builder.build()
         }
 
@@ -266,4 +276,7 @@ interface CookieJar {
 
     /** Persists [cookies] received in the response to a request against [uri]. */
     fun saveFromResponse(uri: Uri, cookies: List<Cookie>)
+
+    /** Drops every cookie this jar holds, in memory and in whatever it persists to. */
+    fun clear() {}
 }
