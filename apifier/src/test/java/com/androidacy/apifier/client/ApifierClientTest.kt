@@ -997,7 +997,7 @@ class ApifierClientTest {
         client.close()
     }
 
-    /** Fails if the global run, or the accessor it publishes through, is gated on the enforcement flag. */
+    /** Fails if the accessor that publishes the verdict is gated on the enforcement flag. */
     @Test
     fun qualificationRunsWithoutEnforcementOptIn() {
         val probes = Executors.newCachedThreadPool()

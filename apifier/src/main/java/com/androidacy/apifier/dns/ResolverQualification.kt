@@ -37,8 +37,8 @@ internal enum class ResolverTrust {
 }
 
 /**
- * Qualifies the resolver the platform hands the app, without reference to any host the app is
- * about to contact.
+ * Qualifies the resolver the platform hands the app. The global lanes below run without
+ * reference to any host the app is about to contact; the per-host check runs on the call.
  *
  * Two global lanes run together: names under `.invalid` that must not resolve, and public canary
  * names that must resolve to public space. A lane where every probe agrees is a verdict; a lane

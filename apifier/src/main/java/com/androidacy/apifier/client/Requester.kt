@@ -133,8 +133,8 @@ sealed interface Requester {
      * receives nothing.
      *
      * Upload progress only reports for a file-backed body (`asRequestBody(File)`, or a multipart
-     * part built from one); a `String`/`ByteArray` body, including [post]'s `json` overload,
-     * reports nothing on the way up. Download progress always reports.
+     * part built from one); a `String`/`ByteArray` body, [post] included, reports nothing on the
+     * way up. Download progress always reports.
      */
     fun progress(sink: MutableSharedFlow<Progress>): Requester
 
