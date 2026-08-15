@@ -95,6 +95,7 @@ internal class Observation(
 
     private val observers = CopyOnWriteArrayList<RequestObserver>()
     private val closed = AtomicBoolean(false)
+    private val dispatching: ThreadLocal<Boolean> = ThreadLocal.withInitial { false }
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
 
     private val mutableEvents = MutableSharedFlow<RequestEvent>(
@@ -126,6 +127,9 @@ internal class Observation(
         }
     }
 
+    /** Whether the calling thread is inside an observer callback, where [close] would join itself. */
+    val isDispatching: Boolean get() = dispatching.get() == true
+
     fun addObserver(observer: RequestObserver) {
         observers.add(observer)
     }
@@ -155,10 +159,13 @@ internal class Observation(
     }
 
     private fun dispatch(observer: RequestObserver, event: RequestEvent) {
+        dispatching.set(true)
         try {
             observer.onEvent(event)
         } catch (e: Throwable) {
             if (e is InterruptedException) Thread.currentThread().interrupt()
+        } finally {
+            dispatching.set(false)
         }
     }
 

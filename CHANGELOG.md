@@ -21,6 +21,10 @@
   `IOException("Cronet request failed")` message needs to switch on `errorCode` instead.
 - `ApifierClient` is `Closeable` and owns an engine, thread pools and a network callback. Call
   `close()` when you are done with it.
+- `close()` blocks for up to twelve seconds while it drains in-flight calls, stops the engine and
+  flushes observation, so keep it off the main thread. It throws `IllegalStateException` when it is
+  called from a `Callback` or a `RequestObserver` of the same client; close from a thread of your
+  own instead.
 
 ### Progress and observation
 

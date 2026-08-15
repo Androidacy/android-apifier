@@ -368,16 +368,21 @@ class ApifierClient internal constructor(
     /**
      * Releases the engine, the pools and the network callback. Idempotent.
      *
+     * Blocks. Draining the in-flight calls, stopping the engine and flushing observation run in
+     * sequence and take up to twelve seconds together, so close the client off the main thread.
+     *
      * In-flight calls are cancelled and awaited first, because the engine refuses to shut down
      * while a request is active. Observation stops last so events from those cancellations are
      * delivered before this returns.
      *
-     * @throws IllegalStateException called from a callback this client is running. That thread
-     * is one of the calls close has to wait for, so it would drain against itself, be interrupted
-     * out of the drain, and lose the pending events.
+     * @throws IllegalStateException called from a callback or an observer this client is running.
+     * That thread is one of the ones close has to wait for, so it would drain against itself, be
+     * interrupted out of the drain, and lose the pending events.
      */
     override fun close() {
-        check(!inCallback.get()) { "close() must not be called from a callback of this client" }
+        check(!inCallback.get() && !observation.isDispatching) {
+            "close() must not be called from a callback of this client"
+        }
         if (!closed.compareAndSet(false, true)) return
 
         // One failing step must not take the rest of the teardown with it.
@@ -509,7 +514,7 @@ class ApifierClient internal constructor(
             dispatch { callback.onResponse(this, response) }
         }
 
-        /** Marks the thread as the client's own, so [close] can refuse the one caller it cannot serve. */
+        /** Marks the thread as the client's own, so [close] can refuse a caller it cannot serve. */
         private fun dispatch(delivery: () -> Unit) {
             inCallback.set(true)
             try {

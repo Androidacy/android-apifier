@@ -423,6 +423,93 @@ class ApifierClientTest {
         assertEquals(listOf("shutdown"), engine.log)
     }
 
+    /** Production change that fails this: dropping the callback marker from observation dispatch. */
+    @Test
+    @Suppress("DEPRECATION")
+    fun closeFromAnEventCollectorIsRefused() {
+        val client = clientOf(FakeEngine())
+        val thrown = AtomicReference<Throwable?>()
+        val attempted = CountDownLatch(1)
+        client.addObserver {
+            thrown.set(runCatching { client.close() }.exceptionOrNull())
+            attempted.countDown()
+        }
+
+        runBlocking { client.get(URL).close() }
+
+        assertTrue("the observer never ran", attempted.await(10, TimeUnit.SECONDS))
+        assertTrue("got ${thrown.get()}", thrown.get() is IllegalStateException)
+        client.close()
+    }
+
+    /**
+     * A refused close runs no teardown step, which is what keeps it prompt. Production change that
+     * fails this: letting close() reach the observation join from the collector's own thread, where
+     * it spends the close timeout after shutting the engine down on the way there.
+     */
+    @Test
+    @Suppress("DEPRECATION")
+    fun closeFromAnEventCollectorDoesNotHang() {
+        val engine = FakeEngine()
+        val client = clientOf(engine)
+        val attempted = CountDownLatch(1)
+        client.addObserver {
+            runCatching { client.close() }
+            attempted.countDown()
+        }
+
+        runBlocking { client.get(URL).close() }
+
+        assertTrue("the observer never ran", attempted.await(10, TimeUnit.SECONDS))
+        assertTrue("close ran teardown: ${engine.log}", engine.log.isEmpty())
+        client.close()
+    }
+
+    /** Production change that fails this: marking the client rather than the dispatching thread. */
+    @Test
+    @Suppress("DEPRECATION")
+    fun closeFromOutsideACallbackStillSucceeds() {
+        val engine = FakeEngine()
+        val client = clientOf(engine)
+        val delivered = CountDownLatch(1)
+        client.addObserver { delivered.countDown() }
+
+        runBlocking { client.get(URL).close() }
+        assertTrue("the observer never ran", delivered.await(10, TimeUnit.SECONDS))
+        client.close()
+
+        assertEquals(listOf("shutdown"), engine.log)
+        assertThrows(IllegalStateException::class.java) { runBlocking { client.send(getRequest()) } }
+    }
+
+    /** Production change that fails this: tearing the observation scope down on the refused path. */
+    @Test
+    @Suppress("DEPRECATION")
+    fun pendingEventsSurviveARefusedClose() {
+        val client = clientOf(FakeEngine())
+        val proceed = CountDownLatch(1)
+        val delivered = CountDownLatch(2)
+        val attempts = AtomicInteger()
+        val thrown = AtomicReference<Throwable?>()
+        client.addObserver {
+            // Holds the collector until both events are buffered, so the second one is pending
+            // when the refused close lands.
+            proceed.await(10, TimeUnit.SECONDS)
+            if (attempts.getAndIncrement() == 0) thrown.set(runCatching { client.close() }.exceptionOrNull())
+            delivered.countDown()
+        }
+
+        runBlocking {
+            client.get(URL).close()
+            client.get(URL).close()
+        }
+        proceed.countDown()
+
+        assertTrue("${delivered.count} of 2 events never arrived", delivered.await(10, TimeUnit.SECONDS))
+        assertTrue("got ${thrown.get()}", thrown.get() is IllegalStateException)
+        client.close()
+    }
+
     /**
      * Production change that fails this: pointing the pipeline at an Observation other than the one
      * backing [ApifierClient.events], which the deprecated observer path would not notice.
