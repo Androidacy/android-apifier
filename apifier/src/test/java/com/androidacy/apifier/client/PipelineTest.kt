@@ -77,6 +77,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlin.coroutines.resumeWithException
@@ -558,6 +559,24 @@ class PipelineTest {
 
         assertTrue("a body still in hand leaves the budget armed", streaming.isTimedOut)
         assertFalse("closing the body disarms the budget", closed.isTimedOut)
+    }
+
+    /** Production changes that fail this: dropping the settle from the timeout task, or settling it unguarded. */
+    @Test
+    fun settlingTwiceIsHarmless() {
+        val transport = FakeTransport(listOf(step { ok(it) }))
+        val pipeline = pipelineOf(transport, config())
+        val settles = AtomicInteger()
+        val call = PipelineCall()
+        call.onBodyFinished = { settles.incrementAndGet() }
+
+        val response = pipeline.executeBlocking(request().build(), CallOptions(callTimeoutMillis = 150), call)
+        Thread.sleep(500)
+        val afterBudget = settles.get()
+        response.close()
+
+        assertEquals("the budget must settle a body the consumer abandoned", 1, afterBudget)
+        assertEquals("closing an already settled body must not settle it again", 1, settles.get())
     }
 
     /**

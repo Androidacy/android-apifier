@@ -308,6 +308,22 @@ class ApifierClientTest {
         assertTrue("close returned after ${elapsedMs}ms", elapsedMs in 250..4_000)
     }
 
+    /** Production change that fails this: dropping the settle from the pipeline's timeout task. */
+    @Test
+    fun anAbandonedBodyIsDeregisteredWhenTheBudgetExpires() {
+        val engine = FakeEngine()
+        val client = clientOf(engine, NetworkConfig(timeouts = TimeoutConfig(call = 200.milliseconds)))
+        runBlocking { client.send(getRequest()) }
+        Thread.sleep(600)
+
+        val startedAt = System.nanoTime()
+        client.close()
+        val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+
+        // A call still counted as in flight holds close() in its drain for the full 5s timeout.
+        assertTrue("close returned after ${elapsedMs}ms", elapsedMs < 2_000)
+    }
+
     @Test
     @Suppress("DEPRECATION")
     fun closeFromAClientCallbackIsRefused() {

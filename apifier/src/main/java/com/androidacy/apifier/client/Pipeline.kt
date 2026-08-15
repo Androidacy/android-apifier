@@ -203,6 +203,9 @@ internal class Pipeline(
             {
                 call.markTimedOut()
                 call.cancel()
+                // A consumer that abandons a body part-read reaches neither close nor EOF, so this
+                // is the only settle that call will ever get; the cancel above already released it.
+                call.finishBody()
             },
             timeoutMs,
             TimeUnit.MILLISECONDS
