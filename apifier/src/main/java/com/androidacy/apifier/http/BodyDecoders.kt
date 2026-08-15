@@ -19,7 +19,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.okio.decodeFromBufferedSource
@@ -30,13 +29,15 @@ import kotlinx.serialization.json.okio.decodeFromBufferedSource
  */
 @OptIn(ExperimentalSerializationApi::class)
 suspend inline fun <reified T> ResponseBody.json(json: Json = Json.Default): T =
-    withContext(Dispatchers.IO) {
-        use { json.decodeFromBufferedSource(it.source()) }
-    }
+    read { json.decodeFromBufferedSource(it) }
 
 /**
  * Streams the body one line at a time off [Dispatchers.IO], closing it when the flow completes
  * or its collector is cancelled.
+ *
+ * Reads the body's source directly rather than through [read]: [read] dispatches with its own
+ * context switch, and a nested one inside this builder body would emit from a coroutine other
+ * than the one the flow was collected on, which [Flow] forbids.
  */
 fun ResponseBody.lines(): Flow<String> = flow {
     use { body ->

@@ -34,7 +34,8 @@ import okio.sink
  * stays held open.
  *
  * Every instance originates in this library, through [asResponseBody] or [toResponseBody]. The
- * abstract [source] is internal, so a subclass cannot be built outside this module.
+ * abstract [source] is internal, so Kotlin code outside this module cannot implement or override
+ * it; [read] is the accessor for code that needs the underlying [BufferedSource].
  */
 abstract class ResponseBody : Closeable {
 
@@ -43,7 +44,6 @@ abstract class ResponseBody : Closeable {
     /** The length announced by the response, or -1 when the length was not known. */
     abstract fun contentLength(): Long
 
-    @PublishedApi
     internal abstract fun source(): BufferedSource
 
     override fun close() {
@@ -117,6 +117,6 @@ suspend fun ResponseBody.writeTo(file: File): Long = withContext(Dispatchers.IO)
  * [block] returns or throws. The source is valid only for the duration of [block]; a reference
  * kept past it sees a closed source.
  */
-suspend fun <T> ResponseBody.read(block: (BufferedSource) -> T): T = withContext(Dispatchers.IO) {
+suspend fun <T> ResponseBody.read(block: suspend (BufferedSource) -> T): T = withContext(Dispatchers.IO) {
     use { block(it.source()) }
 }
