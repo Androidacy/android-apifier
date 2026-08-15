@@ -65,6 +65,9 @@ dependencies {
     // AndroidX
     implementation("androidx.core:core-ktx:1.19.0")
 
+    // @Discouraged on ResponseBody.bytes(), part of the http package's public API
+    api("androidx.annotation:annotation:1.10.0")
+
     // DataStore: only needed by consumers using DataStoreCookieStorage
     compileOnly("androidx.datastore:datastore-preferences:1.2.1")
 

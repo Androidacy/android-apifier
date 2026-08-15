@@ -15,20 +15,26 @@
  */
 package com.androidacy.apifier.http
 
+import androidx.annotation.Discouraged
 import java.io.Closeable
-import java.io.InputStream
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okio.Buffer
 import okio.BufferedSource
+import okio.buffer
+import okio.sink
 
 /**
  * A response payload, read as a stream.
  *
- * The bytes arrive from the network as they are read, so a body is consumed once: [bytes] and
- * [string] drain the source and close it, and any later read sees an exhausted stream. Close
- * a body you do not read, either directly or through [Response.close], or the underlying
- * connection stays held open.
+ * The bytes arrive from the network as they are read, so a body is consumed once: reading it
+ * drains the source and closes it, and any later read sees an exhausted stream. Close a body
+ * you do not read, either directly or through [Response.close], or the underlying connection
+ * stays held open.
+ *
+ * Every instance originates in this library, through [asResponseBody] or [toResponseBody]. The
+ * abstract [source] is internal, so a subclass cannot be built outside this module.
  */
 abstract class ResponseBody : Closeable {
 
@@ -37,23 +43,9 @@ abstract class ResponseBody : Closeable {
     /** The length announced by the response, or -1 when the length was not known. */
     abstract fun contentLength(): Long
 
-    @Deprecated(
-        "Blocks the calling thread when read. Use ResponseBody.bytes() or ResponseBody.string() " +
-            "for a suspending whole-body read. Removed in 4.0."
-    )
-    abstract fun source(): BufferedSource
-
-    @Deprecated(
-        "Blocks the calling thread when read. Use ResponseBody.bytes() or ResponseBody.string() " +
-            "for a suspending whole-body read. Removed in 4.0."
-    )
-    fun byteStream(): InputStream {
-        @Suppress("DEPRECATION")
-        return source().inputStream()
-    }
+    internal abstract fun source(): BufferedSource
 
     override fun close() {
-        @Suppress("DEPRECATION")
         source().close()
     }
 
@@ -67,34 +59,63 @@ abstract class ResponseBody : Closeable {
 
         @JvmStatic
         @JvmName("create")
-        fun BufferedSource.asResponseBody(contentType: MediaType?, contentLength: Long): ResponseBody {
+        fun BufferedSource.asResponseBody(contentType: MediaType?, contentLength: Long = -1L): ResponseBody {
             val source = this
             return object : ResponseBody() {
                 override fun contentType(): MediaType? = contentType
 
                 override fun contentLength(): Long = contentLength
 
-                @Suppress("OVERRIDE_DEPRECATION")
                 override fun source(): BufferedSource = source
             }
         }
     }
 }
 
-/** Reads the body to its end on [Dispatchers.IO] and closes it. */
+/**
+ * Reads the body to its end on [Dispatchers.IO] and closes it. Holds the whole body in memory
+ * at once; a large or unknown-length response belongs on [writeTo] or [read].
+ */
+@Discouraged("Holds the whole body in memory. Use ResponseBody.writeTo or ResponseBody.read for a streaming response.")
+@Deprecated(
+    "Holds the whole body in memory. Use ResponseBody.writeTo or ResponseBody.read for a " +
+        "streaming response.",
+    level = DeprecationLevel.WARNING
+)
 suspend fun ResponseBody.bytes(): ByteArray = withContext(Dispatchers.IO) {
-    @Suppress("DEPRECATION")
     use { it.source().readByteArray() }
 }
 
 /**
  * Reads the body to its end as text on [Dispatchers.IO] and closes it, decoding with the
- * charset of [ResponseBody.contentType] and UTF-8 when it names none.
+ * charset of [ResponseBody.contentType] and UTF-8 when it names none. Holds the whole body in
+ * memory at once; a large or unknown-length response belongs on [writeTo] or [read].
  */
 suspend fun ResponseBody.string(): String {
     val charset = contentType()?.charset ?: Charsets.UTF_8
     return withContext(Dispatchers.IO) {
-        @Suppress("DEPRECATION")
         use { it.source().readString(charset) }
     }
+}
+
+/**
+ * Streams the body to [file] on [Dispatchers.IO] and closes the body, without holding it in
+ * memory. Overwrites an existing file. On failure the partial file is left in place and the
+ * [java.io.IOException] propagates; deleting it is the caller's call to make.
+ *
+ * @return the number of bytes written.
+ */
+suspend fun ResponseBody.writeTo(file: File): Long = withContext(Dispatchers.IO) {
+    use { body ->
+        file.sink().buffer().use { sink -> sink.writeAll(body.source()) }
+    }
+}
+
+/**
+ * Hands the body's [BufferedSource] to [block] on [Dispatchers.IO] and closes the body once
+ * [block] returns or throws. The source is valid only for the duration of [block]; a reference
+ * kept past it sees a closed source.
+ */
+suspend fun <T> ResponseBody.read(block: (BufferedSource) -> T): T = withContext(Dispatchers.IO) {
+    use { block(it.source()) }
 }

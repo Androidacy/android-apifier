@@ -78,7 +78,11 @@ interface Requester {
     /** HEAD [url]. See [send]. */
     suspend fun head(url: String): Response = send(Request.Builder().url(url).head().build())
 
-    /** GET [url] as a download. Same request as [get]; attach a [progress] sink to count the bytes. */
+    /**
+     * GET [url] as a download. Same request as [get]; attach a [progress] sink to count the
+     * bytes. The returned [Response] has no built-in way to reach disk; stream its body there
+     * with [com.androidacy.apifier.http.writeTo].
+     */
     suspend fun download(url: String): Response = get(url)
 
     /**

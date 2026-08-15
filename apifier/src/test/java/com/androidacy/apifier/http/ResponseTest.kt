@@ -18,9 +18,13 @@ package com.androidacy.apifier.http
 import com.androidacy.apifier.http.MediaType.Companion.toMediaTypeOrNull
 import com.androidacy.apifier.http.ResponseBody.Companion.asResponseBody
 import com.androidacy.apifier.http.ResponseBody.Companion.toResponseBody
+import java.io.File
+import java.io.IOException
 import kotlinx.coroutines.test.runTest
 import okio.Buffer
 import okio.ForwardingSource
+import okio.Source
+import okio.Timeout
 import okio.buffer
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -128,6 +132,153 @@ class ResponseTest {
         val second = response.body.bytes()
 
         assertFalse("a second read replayed the already-consumed body", second.contentEquals(payload))
+    }
+
+    @Test
+    fun writeToStreamsTheBodyToDisk() = runTest {
+        val payload = ByteArray(5_000) { it.toByte() }
+        val response = newBuilder().body(payload.toResponseBody()).build()
+        val file = File.createTempFile("apifier-write-to", ".bin")
+
+        val written = response.body.writeTo(file)
+
+        assertEquals(payload.size.toLong(), written)
+        assertArrayEquals(payload, file.readBytes())
+        file.delete()
+    }
+
+    @Test
+    fun writeToDoesNotBufferTheWholeBody() = runTest {
+        val chunkSize = 8_192
+        val payload = ByteArray(chunkSize * 3) { it.toByte() }
+        val file = File.createTempFile("apifier-write-to-chunked", ".bin")
+        var served = 0
+        val diskLengthsBeforeLaterChunks = mutableListOf<Long>()
+        val source = object : Source {
+            override fun read(sink: Buffer, byteCount: Long): Long {
+                if (served == payload.size / chunkSize) return -1L
+                if (served > 0) diskLengthsBeforeLaterChunks.add(file.length())
+                sink.write(payload, served * chunkSize, chunkSize)
+                served++
+                return chunkSize.toLong()
+            }
+
+            override fun timeout(): Timeout = Timeout.NONE
+
+            override fun close() = Unit
+        }.buffer()
+        val response = newBuilder().body(source.asResponseBody(null, payload.size.toLong())).build()
+
+        val written = response.body.writeTo(file)
+
+        assertEquals(payload.size.toLong(), written)
+        assertArrayEquals(payload, file.readBytes())
+        assertTrue(
+            "the previous chunk should already be on disk before the transfer finishes",
+            diskLengthsBeforeLaterChunks.all { it > 0 }
+        )
+        file.delete()
+    }
+
+    @Test
+    fun writeToClosesTheBody() = runTest {
+        var closed = false
+        val source = object : ForwardingSource(Buffer().writeUtf8("hello")) {
+            override fun close() {
+                closed = true
+                super.close()
+            }
+        }.buffer()
+        val response = newBuilder().body(source.asResponseBody(null, 5L)).build()
+        val file = File.createTempFile("apifier-write-to-close", ".bin")
+
+        response.body.writeTo(file)
+
+        assertTrue(closed)
+        file.delete()
+    }
+
+    @Test
+    fun writeToPropagatesAFailureAndLeavesThePartialFile() = runTest {
+        val firstChunk = "partial-".toByteArray()
+        val failure = IOException("read failed")
+        var served = false
+        val source = object : Source {
+            override fun read(sink: Buffer, byteCount: Long): Long {
+                if (served) throw failure
+                served = true
+                sink.write(firstChunk)
+                return firstChunk.size.toLong()
+            }
+
+            override fun timeout(): Timeout = Timeout.NONE
+
+            override fun close() = Unit
+        }.buffer()
+        val response = newBuilder().body(source.asResponseBody(null, -1L)).build()
+        val file = File.createTempFile("apifier-write-to-fail", ".bin")
+
+        val thrown = try {
+            response.body.writeTo(file)
+            null
+        } catch (e: IOException) {
+            e
+        }
+
+        assertEquals(failure.message, thrown?.message)
+        assertArrayEquals(firstChunk, file.readBytes())
+        file.delete()
+    }
+
+    @Test
+    fun readClosesTheBodyWhenBlockReturns() = runTest {
+        var closed = false
+        val source = object : ForwardingSource(Buffer().writeUtf8("hello")) {
+            override fun close() {
+                closed = true
+                super.close()
+            }
+        }.buffer()
+        val response = newBuilder().body(source.asResponseBody(null, 5L)).build()
+
+        val result = response.body.read { it.readUtf8() }
+
+        assertEquals("hello", result)
+        assertTrue(closed)
+    }
+
+    @Test
+    fun readClosesTheBodyWhenBlockThrows() = runTest {
+        var closed = false
+        val source = object : ForwardingSource(Buffer().writeUtf8("hello")) {
+            override fun close() {
+                closed = true
+                super.close()
+            }
+        }.buffer()
+        val response = newBuilder().body(source.asResponseBody(null, 5L)).build()
+        val failure = IllegalStateException("block failed")
+
+        val thrown = try {
+            response.body.read<Unit> { throw failure }
+            null
+        } catch (e: IllegalStateException) {
+            e
+        }
+
+        assertEquals(failure.message, thrown?.message)
+        assertTrue(closed)
+    }
+
+    @Test
+    fun readRunsOffTheCallingThread() = runTest {
+        var blockThread: Thread? = null
+        val response = newBuilder().body("hello".toByteArray().toResponseBody()).build()
+        val callingThread = Thread.currentThread()
+
+        response.body.read { blockThread = Thread.currentThread() }
+
+        assertNotEquals(callingThread, blockThread)
     }
 
     @Test
