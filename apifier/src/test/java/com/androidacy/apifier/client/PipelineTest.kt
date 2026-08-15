@@ -16,10 +16,7 @@
 package com.androidacy.apifier.client
 
 import android.net.Uri
-import com.androidacy.apifier.dns.DnsAnswer
-import com.androidacy.apifier.dns.PinnedRootTrust
-import com.androidacy.apifier.dns.ProtectedDomainCheck
-import com.androidacy.apifier.dns.TrustedResolver
+import com.androidacy.apifier.dns.ResolverQualification
 import com.androidacy.apifier.http.ApifierException
 import com.androidacy.apifier.http.Cookie
 import com.androidacy.apifier.http.CookieJar
@@ -70,11 +67,10 @@ import org.robolectric.RobolectricTestRunner
 import java.io.File
 import java.io.IOException
 import java.nio.ByteBuffer
-import java.security.KeyStore
-import java.security.cert.X509Certificate
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -324,16 +320,17 @@ class PipelineTest {
         response.close()
     }
 
+    /** Also fails if the gate stops running ahead of the breaker, or if a refusal is retried. */
     @Test
-    fun dnsUntrustedNeverRetried() {
+    fun anUntrustedResolverRefusesCallsWhenEnforcing() {
         val transport = FakeTransport(listOf(step { ok(it) }))
         val breakers = BreakerRegistry(CircuitBreakerConfig(failureThreshold = 1))
         val breaker = checkNotNull(breakers.forHost(HOST))
         val pipeline = pipelineOf(
             transport,
-            config(retry = RetryConfig(maxAttempts = 3)),
+            config(retry = RetryConfig(maxAttempts = 3), enforceResolver = true),
             breakers = breakers,
-            trustCheck = failingTrustCheck()
+            qualification = untrustedQualification()
         )
 
         val thrown = assertThrows(ApifierException.DnsUntrusted::class.java) {
@@ -351,21 +348,154 @@ class PipelineTest {
         }
     }
 
-    /**
-     * The verdict wait releases itself after two seconds, so a dispatcher parked on it is only
-     * distinguishable from a free one inside that window.
-     */
+    /** Fails if enforcement becomes unconditional. */
+    @Test
+    fun anUntrustedResolverDoesNotRefuseCallsWhenNotEnforcing() {
+        val transport = FakeTransport(listOf(step { ok(it) }))
+        val pipeline = pipelineOf(transport, config(), qualification = untrustedQualification())
+
+        val response = pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall())
+
+        assertEquals(200, response.code)
+        assertEquals(1, transport.seen.size)
+        response.close()
+    }
+
+    /** Fails if a verdict that has not landed blocks a caller who never asked for enforcement. */
+    @Test
+    fun aPendingVerdictNeverBlocksANonEnforcingClient() {
+        val transport = FakeTransport(listOf(step { ok(it) }))
+        val pipeline = pipelineOf(transport, config(), qualification = pendingQualification())
+
+        val response = pipeline.executeBlocking(
+            request().build(),
+            CallOptions(callTimeoutMillis = PENDING_BUDGET_MS),
+            PipelineCall()
+        )
+
+        assertEquals(200, response.code)
+        response.close()
+    }
+
+    /** Fails if the wait gets a budget of its own instead of what is left of the call's. */
+    @Test
+    fun aPendingVerdictWaitsOnTheCallBudgetWhenEnforcing() {
+        val transport = FakeTransport(listOf(step { ok(it) }))
+        val pipeline = pipelineOf(
+            transport,
+            config(enforceResolver = true),
+            qualification = pendingQualification()
+        )
+
+        val startedAt = System.nanoTime()
+        assertThrows(ApifierException.DnsUntrusted::class.java) {
+            pipeline.executeBlocking(
+                request().build(),
+                CallOptions(callTimeoutMillis = PENDING_BUDGET_MS),
+                PipelineCall()
+            )
+        }
+        val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+
+        assertTrue("the gate gave up after ${elapsedMs}ms", elapsedMs >= PENDING_BUDGET_MS - 100)
+        assertEquals(0, transport.seen.size)
+    }
+
+    /** Fails if an effectively unbounded budget is handed to the wait as it stands, wrapping its deadline negative. */
+    @Test
+    fun anEffectivelyUnboundedCallBudgetStillWaitsForTheVerdict() {
+        val transport = FakeTransport(listOf(step { ok(it) }))
+        val answer = CountDownLatch(1)
+        val probes = Executors.newCachedThreadPool()
+        val qualification = ResolverQualification(
+            resolve = { host ->
+                answer.await(10, TimeUnit.SECONDS)
+                if (host.endsWith(INVALID_SUFFIX)) emptyList() else listOf(PUBLIC_ADDRESS)
+            },
+            executor = probes,
+            junkLabelCount = 1,
+            canaries = listOf(CANARY),
+            // The wait reads its clock after the gate has computed the budget, so this offset
+            // stands in for that gap and makes an unguarded budget overflow every run.
+            clock = { System.currentTimeMillis() + CLOCK_SKEW_MS }
+        )
+        val pipeline = pipelineOf(transport, config(enforceResolver = true), qualification = qualification)
+        thread(isDaemon = true) {
+            Thread.sleep(200)
+            answer.countDown()
+        }
+
+        val response = pipeline.executeBlocking(
+            request().build(),
+            CallOptions(callTimeoutMillis = Long.MAX_VALUE),
+            PipelineCall()
+        )
+
+        assertEquals(200, response.code)
+        response.close()
+        probes.shutdownNow()
+    }
+
+    /** Fails if the gate drops its per-host consult and rules on the global verdict alone. */
+    @Test
+    fun aHostUntrustedOnFirstSightIsRefusedWhenEnforcing() {
+        val transport = FakeTransport(listOf(step { ok(it) }))
+        val qualification = qualification { host ->
+            when {
+                host == HOST -> listOf("192.168.1.1")
+                host.endsWith(INVALID_SUFFIX) -> emptyList()
+                else -> listOf(PUBLIC_ADDRESS)
+            }
+        }
+        val pipeline = pipelineOf(transport, config(enforceResolver = true), qualification = qualification)
+
+        val thrown = assertThrows(ApifierException.DnsUntrusted::class.java) {
+            pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall())
+        }
+
+        assertEquals(HOST, thrown.host)
+        assertEquals(0, transport.seen.size)
+    }
+
+    /** Fails if the per-host check runs for a caller who never asked for enforcement. */
+    @Test
+    fun perHostChecksDoNotRunWithoutEnforcement() {
+        val transport = FakeTransport(listOf(step { ok(it) }))
+        val resolved = CopyOnWriteArrayList<String>()
+        val qualification = qualification { host ->
+            resolved += host
+            if (host.endsWith(INVALID_SUFFIX)) emptyList() else listOf(PUBLIC_ADDRESS)
+        }
+        val pipeline = pipelineOf(transport, config(), qualification = qualification)
+
+        val response = pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall())
+
+        assertEquals(200, response.code)
+        assertFalse("the call host was resolved: $resolved", resolved.contains(HOST))
+        response.close()
+    }
+
+    /** Fails if the verdict wait parks its thread instead of suspending. */
     @Test
     fun trustWaitDoesNotBlockTheCallingThread() {
         val transport = FakeTransport(listOf(step { ok(it) }))
-        val pending = pendingTrustCheck()
-        val pipeline = pipelineOf(transport, config(), trustCheck = pending)
+        val pipeline = pipelineOf(
+            transport,
+            config(enforceResolver = true),
+            qualification = pendingQualification()
+        )
         val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
         val scope = CoroutineScope(dispatcher)
         val done = CountDownLatch(1)
 
         scope.launch {
-            pipeline.execute(request().build(), CallOptions(), PipelineCall()).close()
+            runCatching {
+                pipeline.execute(
+                    request().build(),
+                    CallOptions(callTimeoutMillis = PENDING_BUDGET_MS),
+                    PipelineCall()
+                ).close()
+            }
             done.countDown()
         }
         val marker = CountDownLatch(1)
@@ -375,7 +505,6 @@ class PipelineTest {
             "the trust wait parked the calling dispatcher",
             marker.await(1, TimeUnit.SECONDS)
         )
-        pending.shutdown()
         assertTrue(done.await(10, TimeUnit.SECONDS))
         dispatcher.close()
     }
@@ -807,21 +936,27 @@ class PipelineTest {
     private fun config(
         headers: Map<String, String> = emptyMap(),
         dynamicHeaders: Map<String, () -> String> = emptyMap(),
-        retry: RetryConfig = RetryConfig()
-    ) = NetworkConfig(headers = headers, dynamicHeaders = dynamicHeaders, retryConfig = retry)
+        retry: RetryConfig = RetryConfig(),
+        enforceResolver: Boolean = false
+    ) = NetworkConfig(
+        headers = headers,
+        dynamicHeaders = dynamicHeaders,
+        retryConfig = retry,
+        ensureTrustworthyResolver = enforceResolver
+    )
 
     private fun pipelineOf(
         transport: FakeTransport,
         config: NetworkConfig,
         jar: CookieJar? = null,
         breakers: BreakerRegistry = BreakerRegistry(config.circuitBreakerConfig),
-        trustCheck: ProtectedDomainCheck? = null
+        qualification: ResolverQualification = qualification(CLEAN_RESOLVE)
     ) = Pipeline(
         transport::newCall,
         config,
         jar,
         if (jar == null) null else psl,
-        trustCheck,
+        qualification,
         breakers,
         scheduler,
         "test-provider",
@@ -863,20 +998,26 @@ class PipelineTest {
     private fun hopStep(produce: (Request, TransportListener?) -> Response) =
         Step(0) { request, listener, _ -> produce(request, listener) }
 
-    /** A verdict of FAIL: every trusted resolver disagrees with what the system resolver answered. */
-    private fun failingTrustCheck(): ProtectedDomainCheck {
-        val store = KeyStore.getInstance("PKCS12")
-        checkNotNull(javaClass.classLoader?.getResourceAsStream("dns/test_ca.p12"))
-            .use { store.load(it, "apifier-test".toCharArray()) }
-        val trust = PinnedRootTrust(listOf(store.getCertificate("ca") as X509Certificate))
-        val resolvers = List(3) { FakeResolver(trust) }
-        return ProtectedDomainCheck(listOf(HOST), resolvers, { listOf("1.1.1.1") }, { it.run() })
-            .apply { start() }
-    }
+    /** Runs every probe on the calling thread, so a verdict is settled by the time a read returns. */
+    private fun qualification(resolve: (String) -> List<String>) = ResolverQualification(
+        resolve = resolve,
+        executor = Executor { it.run() },
+        junkLabelCount = 1,
+        canaries = listOf(CANARY),
+        clock = { 0L }
+    )
+
+    /** An answer for a name that is never delegated, which is a resolver rewriting NXDOMAIN. */
+    private fun untrustedQualification() = qualification { listOf(PUBLIC_ADDRESS) }
 
     /** No verdict ever arrives: the probe executor drops the work it is handed. */
-    private fun pendingTrustCheck(): ProtectedDomainCheck =
-        ProtectedDomainCheck(listOf(HOST), emptyList(), { emptyList() }, { }).apply { start() }
+    private fun pendingQualification() = ResolverQualification(
+        resolve = { emptyList() },
+        executor = Executor { },
+        junkLabelCount = 1,
+        canaries = listOf(CANARY),
+        clock = System::currentTimeMillis
+    )
 
     /** A body that only ends when the transport is cancelled, the way [BodyPipe] behaves. */
     private fun slowBodyStep() = Step(0) { request, _, cancelSignal ->
@@ -910,12 +1051,6 @@ class PipelineTest {
             override fun close() = Unit
         }
         return source.buffer().asResponseBody(null, contentLength)
-    }
-
-    /** Disagrees with the scripted system answer, so every verdict is FAIL. */
-    private class FakeResolver(trust: PinnedRootTrust) :
-        TrustedResolver("fake", "https://127.0.0.1/dns-query", trust) {
-        override fun query(hostname: String): DnsAnswer = DnsAnswer(listOf("8.8.8.8"), 60)
     }
 
     private class RecordingJar(private val stored: List<Cookie> = emptyList()) : CookieJar {
@@ -1006,5 +1141,13 @@ class PipelineTest {
 
     private companion object {
         const val HOST = "api.example.com"
+        const val CANARY = "canary.example.org"
+        const val INVALID_SUFFIX = ".invalid"
+        const val PUBLIC_ADDRESS = "93.184.216.34"
+        const val PENDING_BUDGET_MS = 400L
+        const val CLOCK_SKEW_MS = 100L
+        val CLEAN_RESOLVE: (String) -> List<String> = { host ->
+            if (host.endsWith(INVALID_SUFFIX)) emptyList() else listOf(PUBLIC_ADDRESS)
+        }
     }
 }

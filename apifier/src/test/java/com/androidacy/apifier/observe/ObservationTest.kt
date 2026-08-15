@@ -24,10 +24,7 @@ import com.androidacy.apifier.client.Pipeline
 import com.androidacy.apifier.client.PipelineCall
 import com.androidacy.apifier.client.RetryConfig
 import com.androidacy.apifier.client.TransportListener
-import com.androidacy.apifier.dns.DnsAnswer
-import com.androidacy.apifier.dns.PinnedRootTrust
-import com.androidacy.apifier.dns.ProtectedDomainCheck
-import com.androidacy.apifier.dns.TrustedResolver
+import com.androidacy.apifier.dns.ResolverQualification
 import com.androidacy.apifier.http.ApifierException
 import com.androidacy.apifier.http.ErrorCode
 import com.androidacy.apifier.http.Headers
@@ -55,10 +52,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import java.io.IOException
-import java.security.KeyStore
-import java.security.cert.X509Certificate
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -374,7 +370,13 @@ class ObservationTest {
     fun dnsUntrustedReachesPerRequestObserver() {
         val transport = FakeTransport(listOf(step { ok(it) }))
         val observation = Observation()
-        val pipeline = pipelineOf(transport, config(), observation, trustCheck = failingTrustCheck())
+        val pipeline = pipelineOf(
+            transport,
+            config(enforceResolver = true),
+            observation,
+            // An answer for a name that is never delegated, which is a resolver rewriting NXDOMAIN.
+            qualification = qualification { listOf(PUBLIC_ADDRESS) }
+        )
         val perRequest = recordingObserver()
 
         val thrown = runCatching {
@@ -589,43 +591,43 @@ class ObservationTest {
     private fun config(
         retry: RetryConfig = RetryConfig(),
         headers: Map<String, String> = emptyMap(),
-        dynamicHeaders: Map<String, () -> String> = emptyMap()
-    ) = NetworkConfig(headers = headers, dynamicHeaders = dynamicHeaders, retryConfig = retry)
+        dynamicHeaders: Map<String, () -> String> = emptyMap(),
+        enforceResolver: Boolean = false
+    ) = NetworkConfig(
+        headers = headers,
+        dynamicHeaders = dynamicHeaders,
+        retryConfig = retry,
+        ensureTrustworthyResolver = enforceResolver
+    )
 
     private fun pipelineOf(
         transport: FakeTransport,
         config: NetworkConfig,
         observation: Observation,
         breakers: BreakerRegistry = BreakerRegistry(config.circuitBreakerConfig),
-        trustCheck: ProtectedDomainCheck? = null
+        qualification: ResolverQualification = qualification { host ->
+            if (host.endsWith(".invalid")) emptyList() else listOf(PUBLIC_ADDRESS)
+        }
     ) = Pipeline(
         transport::newCall,
         config,
         null,
         null,
-        trustCheck,
+        qualification,
         breakers,
         scheduler,
         "test-provider",
         observation
     )
 
-    /** A verdict of FAIL: every trusted resolver disagrees with what the system resolver answered. */
-    private fun failingTrustCheck(): ProtectedDomainCheck {
-        val store = KeyStore.getInstance("PKCS12")
-        checkNotNull(javaClass.classLoader?.getResourceAsStream("dns/test_ca.p12"))
-            .use { store.load(it, "apifier-test".toCharArray()) }
-        val trust = PinnedRootTrust(listOf(store.getCertificate("ca") as X509Certificate))
-        val resolvers = List(3) { FakeResolver(trust) }
-        return ProtectedDomainCheck(listOf(HOST), resolvers, { listOf("1.1.1.1") }, { it.run() })
-            .apply { start() }
-    }
-
-    /** Disagrees with the scripted system answer, so every verdict is FAIL. */
-    private class FakeResolver(trust: PinnedRootTrust) :
-        TrustedResolver("fake", "https://127.0.0.1/dns-query", trust) {
-        override fun query(hostname: String): DnsAnswer = DnsAnswer(listOf("8.8.8.8"), 60)
-    }
+    /** Runs every probe on the calling thread, so a verdict is settled by the time a read returns. */
+    private fun qualification(resolve: (String) -> List<String>) = ResolverQualification(
+        resolve = resolve,
+        executor = Executor { it.run() },
+        junkLabelCount = 1,
+        canaries = listOf("canary.example.org"),
+        clock = { 0L }
+    )
 
     private fun ok(request: Request, code: Int = 200, body: ResponseBody = ByteArray(0).toResponseBody(null)): Response =
         Response.Builder()
@@ -724,6 +726,7 @@ class ObservationTest {
 
     private companion object {
         const val HOST = "api.example.com"
+        const val PUBLIC_ADDRESS = "93.184.216.34"
 
         /** Mirrors Observation's own extraBufferCapacity, so the flood test can size past it. */
         const val EVENT_BUFFER_CAPACITY = 1024

@@ -16,7 +16,8 @@
 package com.androidacy.apifier.client
 
 import android.net.Uri
-import com.androidacy.apifier.dns.ProtectedDomainCheck
+import com.androidacy.apifier.dns.ResolverQualification
+import com.androidacy.apifier.dns.ResolverTrust
 import com.androidacy.apifier.http.ApifierException
 import com.androidacy.apifier.http.Call
 import com.androidacy.apifier.http.Cookie
@@ -171,7 +172,7 @@ internal class PipelineCall {
 }
 
 /**
- * Runs one logical call as ordered stages over [transport]: call timeout, trust gate, circuit
+ * Runs one logical call as ordered stages over [transport]: call timeout, resolver gate, circuit
  * breaker, retry, headers, cookies, progress.
  */
 internal class Pipeline(
@@ -179,7 +180,7 @@ internal class Pipeline(
     private val config: NetworkConfig,
     private val cookieJar: CookieJar?,
     private val publicSuffixList: PublicSuffixList?,
-    private val trustCheck: ProtectedDomainCheck?,
+    private val qualification: ResolverQualification,
     private val breakers: BreakerRegistry,
     private val scheduler: ScheduledExecutorService,
     /** Label reported on every [RequestEvent] as the serving provider, e.g. the Cronet engine version. */
@@ -215,13 +216,13 @@ internal class Pipeline(
         )
 
         val response = try {
-            gateTrust(host, deadlineAt)
+            gateResolver(host, deadlineAt)
             val breaker = breakers.forHost(host)
             if (breaker != null && !breaker.checkState()) throw ApifierException.CircuitOpen(host)
             attempts(request, options, call, breaker, timeoutMs, host)
         } catch (e: Throwable) {
             timeoutTask.cancel(false)
-            // Several paths end a call without reaching reportAttempt: the trust gate, the breaker,
+            // Several paths end a call without reaching reportAttempt: the resolver gate, the breaker,
             // a cancel or timeout landing in backoff, and consumer code throwing from a header
             // provider or a cookie jar. A cancellation is not an IOException but ends the call just
             // as a caller's own cancel does, and the observer is owed one event whatever ended it.
@@ -245,22 +246,24 @@ internal class Pipeline(
 
     /**
      * Runs once per call and ahead of the breaker, so a host refused here never records a failure
-     * against a server that did nothing wrong. The wait is capped well under the call budget
-     * because a missing verdict never blocks anyway.
-     *
-     * [ProtectedDomainCheck.shouldBlock] already answers false when enforcement is off, so it
-     * is always consulted here; only the wait is worth skipping.
+     * against a server that did nothing wrong. A verdict still pending is waited for on the call's
+     * own budget, so a check that runs out of time ends the call at the instant the request would
+     * have ended anyway.
      */
-    private suspend fun gateTrust(host: String, deadlineAt: Long) {
-        val check = trustCheck ?: return
-        val budget = (deadlineAt - System.currentTimeMillis()).coerceAtMost(TRUST_VERDICT_WAIT_MS)
-        // The wait parks its thread for up to TRUST_VERDICT_WAIT_MS, which the caller's own
-        // dispatcher may not have to spare.
-        if (check.enforcing && budget > 0) {
-            withContext(Dispatchers.IO) { check.awaitVerdict(host, budget) }
+    private suspend fun gateResolver(host: String, deadlineAt: Long) {
+        if (!config.ensureTrustworthyResolver) return
+        if (qualification.awaitGlobalTrust(verdictBudget(deadlineAt)) != ResolverTrust.TRUSTED) {
+            throw ApifierException.DnsUntrusted(host)
         }
-        if (check.shouldBlock(host)) throw ApifierException.DnsUntrusted(host)
+        if (qualification.awaitHostTrust(host, verdictBudget(deadlineAt)) != ResolverTrust.TRUSTED) {
+            throw ApifierException.DnsUntrusted(host)
+        }
     }
+
+    // An effectively unbounded call budget leaves deadlineAt at Long.MAX_VALUE, and handing that
+    // whole span on would wrap the wait's own deadline negative.
+    private fun verdictBudget(deadlineAt: Long): Long =
+        (deadlineAt - System.currentTimeMillis()).coerceIn(0L, MAX_VERDICT_BUDGET_MS)
 
     private suspend fun attempts(
         request: Request,
@@ -496,7 +499,7 @@ internal class Pipeline(
     }
 
     /**
-     * Reports a call-ending failure that never reached [reportAttempt]: the trust gate, the
+     * Reports a call-ending failure that never reached [reportAttempt]: the resolver gate, the
      * breaker, a surrender ahead of an attempt, a cancel/timeout landing in backoff between
      * attempts, or consumer code throwing while the request is being prepared. Nothing reached the
      * transport, so there is nothing to wait on; the metrics are zero.
@@ -533,7 +536,7 @@ internal class Pipeline(
     private companion object {
         val IDEMPOTENT_METHODS = setOf("GET", "HEAD")
         const val BACKOFF_SLICE_MS = 50L
-        const val TRUST_VERDICT_WAIT_MS = 2_000L
+        const val MAX_VERDICT_BUDGET_MS = Long.MAX_VALUE / 2
         const val NANOS_PER_MILLI = 1_000_000L
     }
 }

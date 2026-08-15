@@ -16,8 +16,10 @@
 package com.androidacy.apifier.client
 
 import android.content.Context
+import android.net.ConnectivityManager
 import android.util.Log
 import androidx.test.core.app.ApplicationProvider
+import com.androidacy.apifier.dns.ResolverQualification
 import com.androidacy.apifier.http.ApifierException
 import com.androidacy.apifier.http.Call
 import com.androidacy.apifier.http.Callback
@@ -53,12 +55,15 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.shadows.ShadowLog
+import org.robolectric.shadows.ShadowNetwork
 import java.io.Closeable
 import java.io.IOException
 import java.net.ServerSocket
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -821,6 +826,83 @@ class ApifierClientTest {
         client.close()
     }
 
+    /** Fails if the global run, or the accessor it publishes through, is gated on the enforcement flag. */
+    @Test
+    fun qualificationRunsWithoutEnforcementOptIn() {
+        val client = clientOf(FakeEngine())
+
+        assertTrue(runBlocking { client.isResolverTrustworthy() })
+        client.close()
+    }
+
+    /** Fails if construction awaits the first verdict. */
+    @Test
+    fun constructionDoesNotWaitForTheGlobalVerdict() {
+        val constructed = CountDownLatch(1)
+        val built = AtomicReference<ApifierClient?>()
+
+        thread(isDaemon = true) {
+            built.set(ApifierClient(context, NetworkConfig(), FakeEngine(), qualification = pendingQualification()))
+            constructed.countDown()
+        }
+
+        assertTrue("construction never returned", constructed.await(10, TimeUnit.SECONDS))
+        built.get()?.close()
+    }
+
+    /** Fails if the accessor answers from a default instead of suspending until a verdict lands. */
+    @Test
+    fun isResolverTrustworthyAwaitsTheFirstVerdict() {
+        val answer = CountDownLatch(1)
+        val probes = Executors.newCachedThreadPool()
+        val client = ApifierClient(
+            context,
+            NetworkConfig(),
+            FakeEngine(),
+            qualification = qualificationOn(probes) { host ->
+                answer.await(10, TimeUnit.SECONDS)
+                if (host.endsWith(INVALID_SUFFIX)) emptyList() else listOf(PUBLIC_ADDRESS)
+            }
+        )
+        val trustworthy = AtomicBoolean(false)
+        val returned = CountDownLatch(1)
+        CoroutineScope(Dispatchers.IO).launch {
+            trustworthy.set(client.isResolverTrustworthy())
+            returned.countDown()
+        }
+
+        assertFalse("the accessor answered before any verdict", returned.await(300, TimeUnit.MILLISECONDS))
+        answer.countDown()
+
+        assertTrue("the accessor never returned", returned.await(10, TimeUnit.SECONDS))
+        assertTrue(trustworthy.get())
+        client.close()
+        probes.shutdownNow()
+    }
+
+    /** Fails if the network callback stops flushing the verdicts, or is registered only when enforcing. */
+    @Test
+    fun aNetworkChangeFlushesTheClientVerdicts() {
+        val rounds = AtomicInteger()
+        val client = ApifierClient(
+            context,
+            NetworkConfig(),
+            FakeEngine(),
+            // Clean on the first round only, so a verdict computed after the flush differs.
+            qualification = qualificationOn(Executor { it.run() }) { host ->
+                if (rounds.get() == 0 && host.endsWith(INVALID_SUFFIX)) emptyList() else listOf(PUBLIC_ADDRESS)
+            }
+        )
+        assertTrue(runBlocking { client.isResolverTrustworthy() })
+
+        rounds.incrementAndGet()
+        val manager = shadowOf(context.getSystemService(ConnectivityManager::class.java))
+        manager.networkCallbacks.forEach { it.onAvailable(ShadowNetwork.newInstance(1)) }
+
+        assertFalse(runBlocking { client.isResolverTrustworthy() })
+        client.close()
+    }
+
     private fun getRequest(): Request = Request.Builder().url(URL).get().build()
 
     private fun singleThreadDispatcher(): ExecutorCoroutineDispatcher =
@@ -852,7 +934,18 @@ class ApifierClientTest {
     }
 
     private fun clientOf(engine: FakeEngine, config: NetworkConfig = NetworkConfig()) =
-        ApifierClient(context, config, engine)
+        ApifierClient(context, config, engine, qualification = qualificationOn(Executor { it.run() }, CLEAN_RESOLVE))
+
+    private fun qualificationOn(executor: Executor, resolve: (String) -> List<String>) = ResolverQualification(
+        resolve = resolve,
+        executor = executor,
+        junkLabelCount = 1,
+        canaries = listOf(CANARY),
+        clock = System::currentTimeMillis
+    )
+
+    /** No verdict ever arrives: the probe executor drops the work it is handed. */
+    private fun pendingQualification() = qualificationOn(Executor { }) { emptyList() }
 
     @Suppress("DEPRECATION")
     private fun countingCallback(latch: CountDownLatch) = object : Callback {
@@ -956,6 +1049,12 @@ class ApifierClientTest {
 
     private companion object {
         const val URL = "https://api.example.com/resource"
+        const val CANARY = "canary.example.org"
+        const val INVALID_SUFFIX = ".invalid"
+        const val PUBLIC_ADDRESS = "93.184.216.34"
+        val CLEAN_RESOLVE: (String) -> List<String> = { host ->
+            if (host.endsWith(INVALID_SUFFIX)) emptyList() else listOf(PUBLIC_ADDRESS)
+        }
         const val READ_TIMEOUT_MS = 5_000L
     }
 }

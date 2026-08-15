@@ -20,8 +20,8 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Looper
 import android.util.Log
-import com.androidacy.apifier.dns.ProtectedDomainCheck
-import com.androidacy.apifier.dns.TrustStatus
+import com.androidacy.apifier.dns.ResolverQualification
+import com.androidacy.apifier.dns.ResolverTrust
 import com.androidacy.apifier.http.ApifierException
 import com.androidacy.apifier.http.Call
 import com.androidacy.apifier.http.Callback
@@ -130,15 +130,15 @@ internal class CronetClientEngine(
 /**
  * HTTP client backed by Cronet.
  *
- * Every call runs through one pipeline: call timeout, protected-domain gate, circuit breaker,
+ * Every call runs through one pipeline: call timeout, resolver gate, circuit breaker,
  * retry, headers, cookies, progress. [Requester.send] is the entry point and the request-shaped
  * helpers are sugar over it.
  *
  * Construction blocks. Selecting a Cronet provider reaches Google Play services, which can wait
  * on a Dynamite download, so build the client on a background thread.
  *
- * The client owns an engine, its thread pools and, when protected domains are configured, a
- * network callback. [close] releases all of them and the instance is unusable afterwards.
+ * The client owns an engine, its thread pools and a network callback. [close] releases all of
+ * them and the instance is unusable afterwards.
  *
  * @param context Android context for Cronet provider initialization
  * @param config network and transport configuration
@@ -146,7 +146,9 @@ internal class CronetClientEngine(
 class ApifierClient internal constructor(
     context: Context,
     config: NetworkConfig,
-    private val engine: ClientEngine
+    private val engine: ClientEngine,
+    private val resolverExecutor: ExecutorService = newResolverPool(),
+    private val qualification: ResolverQualification = ResolverQualification.production(resolverExecutor)
 ) : Requester, Closeable {
 
     constructor(context: Context, config: NetworkConfig) :
@@ -162,32 +164,13 @@ class ApifierClient internal constructor(
             Thread(runnable, "Apifier-Timeout").apply { isDaemon = true }
         }
 
-    // DNS probes block and belong to no one call, so they get a thread of their own.
-    private val trustExecutor: ExecutorService? =
-        if (config.protectedDomains.isEmpty()) {
-            null
-        } else {
-            Executors.newSingleThreadExecutor { runnable ->
-                Thread(runnable, "Apifier-Trust").apply { isDaemon = true }
-            }
-        }
-
-    private val trustCheck: ProtectedDomainCheck? = trustExecutor?.let { executor ->
-        ProtectedDomainCheck.production(appContext, config.protectedDomains, executor).apply {
-            setEnforceProtectedDomains(config.enforceProtectedDomains)
-            start()
-        }
-    }
-
     private val connectivity = appContext.getSystemService(ConnectivityManager::class.java)
 
     private val networkCallback: ConnectivityManager.NetworkCallback? =
-        trustCheck?.let { check ->
-            connectivity?.let { manager ->
-                object : ConnectivityManager.NetworkCallback() {
-                    override fun onAvailable(network: Network) = check.onNetworkChanged()
-                }.also(manager::registerDefaultNetworkCallback)
-            }
+        connectivity?.let { manager ->
+            object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) = qualification.onNetworkChanged()
+            }.also(manager::registerDefaultNetworkCallback)
         }
 
     private val observation = Observation()
@@ -199,7 +182,7 @@ class ApifierClient internal constructor(
             config,
             cookieJar,
             if (cookieJar == null) null else PublicSuffixList.load(appContext),
-            trustCheck,
+            qualification,
             BreakerRegistry(config.circuitBreakerConfig),
             scheduler,
             engine.provider,
@@ -366,16 +349,17 @@ class ApifierClient internal constructor(
     }
 
     /**
-     * Turns blocking on or off for the configured protected domains. Verdicts keep computing
-     * either way and stay readable through [protectedDomainStatus].
+     * Whether the platform resolver answers honestly, suspending until the first verdict lands.
+     * The checks run for every client; wrap the call in `withTimeout` for a ceiling of your own.
      */
-    fun setEnforceProtectedDomains(enforce: Boolean) {
-        trustCheck?.setEnforceProtectedDomains(enforce)
+    suspend fun isResolverTrustworthy(): Boolean {
+        while (true) {
+            // Sliced because the wait measures its budget against a clock, and an unbounded one
+            // would wrap its deadline negative.
+            val verdict = qualification.awaitGlobalTrust(VERDICT_SLICE_MS)
+            if (verdict != ResolverTrust.NONE) return verdict == ResolverTrust.TRUSTED
+        }
     }
-
-    /** Latest verdict for [host], or `UNKNOWN` when it is not protected or has no verdict yet. */
-    fun protectedDomainStatus(host: String): TrustStatus =
-        trustCheck?.status(host) ?: TrustStatus.UNKNOWN
 
     /**
      * Releases the engine, the pools and the network callback. Idempotent.
@@ -398,10 +382,10 @@ class ApifierClient internal constructor(
         }
         teardown { inFlight.forEach { it.cancel() } }
         teardown { scope.cancel() }
-        // Ahead of the drain, since this releases a call parked on a verdict that is never
-        // coming; waiting for it would spend the whole trust budget inside close.
-        teardown { trustCheck?.shutdown() }
-        teardown { trustExecutor?.shutdownNow() }
+        // Ahead of the drain, since a call parked on a verdict that is never coming would
+        // otherwise spend its whole budget inside close.
+        teardown { qualification.shutdown() }
+        teardown { resolverExecutor.shutdownNow() }
         teardown { drainCalls() }
         // A response body the consumer never closed still holds its call-budget task, so an
         // orderly shutdown here would wait out the whole budget for nothing.
@@ -536,7 +520,13 @@ class ApifierClient internal constructor(
         private const val TAG = "ApifierClient"
         private const val DRAIN_TIMEOUT_MS = 5_000L
         private const val DRAIN_POLL_MS = 10L
+        private const val VERDICT_SLICE_MS = 1_000L
         private const val CLOSED_MESSAGE = "client is closed"
+
+        /** A qualification round waits on the probes it submits, so they cannot share one thread. */
+        private fun newResolverPool(): ExecutorService = Executors.newCachedThreadPool { runnable ->
+            Thread(runnable, "Apifier-Resolver").apply { isDaemon = true }
+        }
 
         private fun asDeclaredFailure(e: Throwable): IOException = when (e) {
             is ApifierException -> e

@@ -37,6 +37,11 @@ data class NetworkConfig(
     val protectedDomains: List<String> = emptyList(),
     /** Whether a failed comparison refuses the call. Verdicts are computed either way. */
     val enforceProtectedDomains: Boolean = true,
+    /**
+     * Whether a call is refused while the platform resolver fails qualification. The checks run
+     * for every client either way; only the refusal is opt-in.
+     */
+    val ensureTrustworthyResolver: Boolean = false,
     /** Registers an internal `Log.d`-per-event observer. Advisory only; release logcat is stripped. */
     val logRequests: Boolean = false,
     /** Observer used for a call whose [com.androidacy.apifier.client.Requester.observe] set none. */
@@ -118,9 +123,15 @@ class NetworkConfigBuilder {
     private val dynamicHeaders = mutableMapOf<String, () -> String>()
     private val protectedDomains = mutableListOf<String>()
     var enforceProtectedDomains: Boolean = true
+    private var ensureTrustworthyResolver: Boolean = false
     var logRequests: Boolean = false
     @Suppress("DEPRECATION")
     private var defaultObserver: RequestObserver? = null
+
+    /** Refuses calls while the platform resolver fails qualification; see [NetworkConfig.ensureTrustworthyResolver]. */
+    fun ensureTrustworthyResolver(enabled: Boolean) {
+        ensureTrustworthyResolver = enabled
+    }
 
     /** Hosts to compare against known-good resolvers before calling them. */
     fun protectedDomains(vararg domains: String) {
@@ -179,7 +190,7 @@ class NetworkConfigBuilder {
     fun build() = NetworkConfig(
         cronetConfig, timeouts, retryConfig, circuitBreakerConfig,
         cookieStorage, headers, dynamicHeaders, protectedDomains.toList(),
-        enforceProtectedDomains, logRequests, defaultObserver
+        enforceProtectedDomains, ensureTrustworthyResolver, logRequests, defaultObserver
     )
 }
 
