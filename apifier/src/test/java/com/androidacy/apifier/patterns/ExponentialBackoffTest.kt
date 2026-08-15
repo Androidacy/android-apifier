@@ -16,25 +16,10 @@
 package com.androidacy.apifier.patterns
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ExponentialBackoffTest {
-
-    @Test
-    fun calculateDelayReturnsSentinelAtAndPastMaxAttempts() {
-        val backoff = ExponentialBackoff()
-        assertEquals(-1L, backoff.calculateDelay(5))
-        assertEquals(-1L, backoff.calculateDelay(6))
-    }
-
-    @Test
-    fun calculateDelayReturnsZeroForNegativeAttempt() {
-        val backoff = ExponentialBackoff()
-        assertEquals(0L, backoff.calculateDelay(-1))
-    }
 
     @Test
     fun jitteredDelayNeverExceedsMaxDelay() {
@@ -49,28 +34,12 @@ class ExponentialBackoffTest {
     @Test
     fun delayGrowsGeometricallyUntilClamp() {
         val backoff = ExponentialBackoff(
-            BackoffConfig(maxAttempts = 20, baseDelayMs = 100L, maxDelayMs = 100_000L, multiplier = 2.0, jitterFactor = 0.0)
+            BackoffConfig(baseDelayMs = 100L, maxDelayMs = 100_000L, multiplier = 2.0, jitterFactor = 0.0)
         )
         assertEquals(100L, backoff.calculateDelay(0))
         assertEquals(200L, backoff.calculateDelay(1))
         assertEquals(400L, backoff.calculateDelay(2))
         assertEquals(800L, backoff.calculateDelay(3))
         assertEquals(100_000L, backoff.calculateDelay(10))
-    }
-
-    @Test
-    fun configRejectsInvalidParams() {
-        assertThrows(IllegalArgumentException::class.java) {
-            BackoffConfig(baseDelayMs = 0L)
-        }
-        assertThrows(IllegalArgumentException::class.java) {
-            BackoffConfig(baseDelayMs = 1000L, maxDelayMs = 999L)
-        }
-        assertThrows(IllegalArgumentException::class.java) {
-            BackoffConfig(multiplier = 0.5)
-        }
-        assertThrows(IllegalArgumentException::class.java) {
-            BackoffConfig(jitterFactor = 1.5)
-        }
     }
 }

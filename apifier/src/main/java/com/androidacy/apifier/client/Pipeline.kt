@@ -34,7 +34,6 @@ import com.androidacy.apifier.observe.Observation
 import com.androidacy.apifier.observe.Outcome
 import com.androidacy.apifier.observe.RequestEvent
 import com.androidacy.apifier.observe.RequestObserver
-import com.androidacy.apifier.patterns.BackoffConfig
 import com.androidacy.apifier.patterns.CircuitBreaker
 import com.androidacy.apifier.patterns.ExponentialBackoff
 import com.androidacy.apifier.progress.Progress
@@ -309,8 +308,7 @@ internal class Pipeline(
     ): Response {
         val retry = config.retryConfig
         val maxAttempts = (options.maxAttempts ?: retry.maxAttempts).coerceAtLeast(1)
-        // Sharing the ceiling keeps calculateDelay away from its -1 "attempts exceeded" sentinel.
-        val backoff = ExponentialBackoff(BackoffConfig(maxAttempts = maxAttempts))
+        val backoff = ExponentialBackoff()
         val idempotent = request.method in IDEMPOTENT_METHODS
         var attempt = 0
 

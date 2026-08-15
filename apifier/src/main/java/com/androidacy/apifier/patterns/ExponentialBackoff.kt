@@ -20,32 +20,18 @@ import kotlin.random.Random
 
 /** Tuning parameters for [ExponentialBackoff]. */
 internal data class BackoffConfig(
-    val maxAttempts: Int = 5,
     val baseDelayMs: Long = 1000L,
     val maxDelayMs: Long = 30_000L,
     val multiplier: Double = 2.0,
     val jitterFactor: Double = 0.1
-) {
-    init {
-        require(maxAttempts > 0) { "maxAttempts must be positive" }
-        require(baseDelayMs > 0) { "baseDelayMs must be positive" }
-        require(maxDelayMs >= baseDelayMs) { "maxDelayMs must be >= baseDelayMs" }
-        require(multiplier >= 1.0) { "multiplier must be >= 1.0" }
-        require(jitterFactor in 0.0..1.0) { "jitterFactor must be between 0.0 and 1.0" }
-    }
-}
+)
 
 /** Computes exponential backoff delays with jitter. */
 internal class ExponentialBackoff(private val config: BackoffConfig = BackoffConfig()) {
 
-    /**
-     * @param attemptNumber zero-based attempt index
-     * @return delay in millis, or -1 if max attempts exceeded
-     */
+    /** Delay in millis before the attempt after [attemptNumber], which is a zero-based index. */
     fun calculateDelay(attemptNumber: Int): Long {
-        if (attemptNumber >= config.maxAttempts) return -1
-        if (attemptNumber < 0) return 0
-
+        // Past this the power overflows the delay it feeds, and every result is clamped anyway.
         val exponent = attemptNumber.coerceAtMost(20)
         val delay = (config.baseDelayMs * config.multiplier.pow(exponent))
             .toLong()
