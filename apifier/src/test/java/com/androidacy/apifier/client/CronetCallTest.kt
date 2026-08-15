@@ -30,11 +30,13 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import okio.Buffer
 import org.chromium.net.NetworkException
 import org.chromium.net.UrlRequest
 import org.chromium.net.UrlResponseInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -185,6 +187,47 @@ class CronetCallTest {
         }
         // The failure travelled the body channel because the response was already handed over.
         assertEquals(0, harness.callback.failures.size)
+    }
+
+    /** Fails if the catch in `onBodyChunkRead` stops recording the write failure on the pipe. */
+    @Test
+    fun bodyWriteFailureReachesTheReaderAsAnError() {
+        val harness = Harness(readTimeoutMs = STALL_TIMEOUT_MS)
+        harness.enqueue()
+        harness.cronetCallback.onResponseStarted(harness.urlRequest, info())
+        val body = harness.callback.responses.single().body
+
+        harness.pushUntilTheWriteFails()
+        // The fake request is inert, so play the teardown a live engine sends after the cancel.
+        harness.cronetCallback.onCanceled(harness.urlRequest, info())
+
+        val drained = Buffer()
+        try {
+            body.source().readAll(drained)
+            fail("expected the write failure instead of a clean end of stream")
+        } catch (_: IOException) {
+        }
+        assertTrue("the buffered body was discarded", drained.size > 0)
+    }
+
+    /** Fails if the catch wraps an `IOException` write failure instead of recording it as thrown. */
+    @Test
+    fun bodyWriteFailurePreservesTheOriginalCause() {
+        val harness = Harness(readTimeoutMs = STALL_TIMEOUT_MS)
+        harness.enqueue()
+        harness.cronetCallback.onResponseStarted(harness.urlRequest, info())
+        val body = harness.callback.responses.single().body
+
+        val thrown = harness.pushUntilTheWriteFails()
+        harness.cronetCallback.onCanceled(harness.urlRequest, info())
+
+        val raised = try {
+            body.source().readAll(Buffer())
+            null
+        } catch (e: IOException) {
+            e
+        }
+        assertSame(thrown, raised)
     }
 
     @Test
@@ -465,7 +508,8 @@ class CronetCallTest {
         method: String = "GET",
         listener: TransportListener? = null,
         deliveryExecutor: Executor = Executor { it.run() },
-        requestHeaders: List<Pair<String, String>> = emptyList()
+        requestHeaders: List<Pair<String, String>> = emptyList(),
+        readTimeoutMs: Long = 5_000L
     ) {
         val urlRequest = FakeUrlRequest()
         val callback = RecordingCallback()
@@ -475,7 +519,7 @@ class CronetCallTest {
             Request.Builder().url("https://example.com/").method(method, null)
                 .apply { requestHeaders.forEach { (name, value) -> addHeader(name, value) } }
                 .build(),
-            5_000L,
+            readTimeoutMs,
             listener,
             deliveryExecutor
         ) { cronetCallback, _ ->
@@ -491,6 +535,18 @@ class CronetCallTest {
             val buffer = ByteBuffer.allocateDirect(32 * 1024)
             buffer.put(bytes)
             cronetCallback.onReadCompleted(urlRequest, info(), buffer)
+        }
+
+        /** Pushes twice the pipe's 256 KiB buffer with nobody draining, and returns the throw. */
+        fun pushUntilTheWriteFails(): Exception {
+            repeat(16) {
+                try {
+                    readCompleted(ByteArray(32 * 1024))
+                } catch (e: Exception) {
+                    return e
+                }
+            }
+            throw AssertionError("the pipe took every chunk with nobody draining it")
         }
     }
 
@@ -575,6 +631,7 @@ class CronetCallTest {
 
     private companion object {
         const val AWAIT_TIMEOUT_MS = 5_000L
+        const val STALL_TIMEOUT_MS = 250L
 
         fun info(
             status: Int = 200,

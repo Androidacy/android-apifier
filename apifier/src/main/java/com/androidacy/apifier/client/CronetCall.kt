@@ -258,9 +258,11 @@ internal class CronetCall(
                 transferBuffer.write(byteBuffer)
                 bodyPipe.write(transferBuffer, transferBuffer.size)
             } catch (e: Exception) {
-                // The consumer closed or canceled the pipe. Cancelling releases the connection
-                // and the upload provider; rethrowing stops the base callback from arming
-                // another read against a request that is going away.
+                // The consumer closed or canceled the pipe, or the sink deadline elapsed against
+                // a body nobody drains. The rethrow reaches no terminal callback of ours, so
+                // the failure has to be recorded here or the reader sees a clean EOF; the cancel
+                // releases the connection and stops the base callback arming another read.
+                bodyPipe.fail(if (e is IOException) e else ApifierException.Unexpected(e))
                 urlRequest.get()?.cancel()
                 throw e
             }
