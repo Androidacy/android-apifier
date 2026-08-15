@@ -163,6 +163,9 @@ internal class Observation(
         try {
             observer.onEvent(event)
         } catch (e: Throwable) {
+            // The catch-all keeps one bad observer from killing the dispatch loop for the rest.
+            // Advisory only, since release strips logcat; the events flow is the queryable channel.
+            Log.w(OBSERVER_TAG, "Observer threw while handling an event", e)
             if (e is InterruptedException) Thread.currentThread().interrupt()
         } finally {
             dispatching.set(false)
@@ -172,6 +175,7 @@ internal class Observation(
     private companion object {
         const val CLOSE_TIMEOUT_MILLIS = 5_000L
         const val EVENT_BUFFER_CAPACITY = 1024
+        const val OBSERVER_TAG = "Apifier"
     }
 }
 

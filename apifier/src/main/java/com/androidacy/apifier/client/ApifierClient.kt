@@ -360,7 +360,7 @@ class ApifierClient internal constructor(
     }
 
     /**
-     * Whether the platform resolver answers honestly, suspending until the first verdict lands.
+     * Whether the platform resolver passed qualification, suspending until the first verdict lands.
      * The checks run for every client; wrap the call in `withTimeout` for a ceiling of your own.
      */
     suspend fun isResolverTrustworthy(): Boolean {

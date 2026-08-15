@@ -170,7 +170,7 @@ class HttpClientBuilder(
 
             config.cronetConfig.cacheDirectory?.let { dir ->
                 if (!dir.exists() && !dir.mkdirs()) {
-                    throw IOException("Failed to create cronet cache directory")
+                    throw IOException("Failed to create the Cronet cache directory at ${dir.absolutePath}")
                 }
                 setStoragePath(dir.absolutePath)
                 enableHttpCache(CronetEngine.Builder.HTTP_CACHE_DISK, config.cronetConfig.cacheSizeBytes)

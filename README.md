@@ -6,6 +6,9 @@
 
 HTTP and API networking library for Android, built directly on Cronet.
 
+Upgrading from 2.x is a breaking change. [CHANGELOG.md](CHANGELOG.md) names every symbol that was
+removed or renamed, so a build error can be searched for by the symbol it names.
+
 ## Features
 
 - **Coroutine call surface**: `send()` and its shorthands (`get`, `post`, `delete`, `head`,
@@ -15,7 +18,7 @@ HTTP and API networking library for Android, built directly on Cronet.
 - **Typed errors**: failures surface as `ApifierException` subtypes instead of a generic `IOException`
 - **Request observation**: `ApifierClient.events` is a `SharedFlow<RequestEvent>` carrying outcome,
   timing and byte counts for every attempt; a per-call `observe()` view sees only that call's event
-- **Resolver qualification**: checks whether the platform's DNS resolver is answering honestly, independent of any host the app calls, and rechecks after every network change; optionally refuses calls while it is not, and per-host IP pins for hosts where you know the expected addresses
+- **Resolver qualification**: checks the platform's DNS resolver against names whose correct answers are known, independent of any host the app calls, and rechecks after every network change; optionally refuses calls while those checks fail, and per-host IP pins for hosts where you know the expected addresses
 - **Encrypted cookies**: public-suffix-scoped cookie jar backed by a pluggable store, AES-GCM
   encrypted with an Android Keystore key (StrongBox or TEE where the device has one). A device
   with no usable Keystore drops cookies instead of writing them in cleartext
@@ -122,7 +125,7 @@ val response = client.maxAttempts(1).observe { report(it) }.get("https://api.exa
 Each client qualifies the platform's DNS resolver once and caches the verdict until the network
 changes: names that must not resolve, and public names that must resolve to public address space.
 A resolver that cannot answer both consistently is untrustworthy, which catches one that is broadly
-lying or hijacked. A second check then qualifies the host the call is for on its own, requiring
+wrong or hijacked. A second check then qualifies the host the call is for on its own, requiring
 every address it resolves to be public, so a single hostname being sinkholed is caught while the
 rest of DNS behaves normally. Neither check authenticates an answer against a third-party DNS
 provider, since a geo-DNS fronted host can see different, equally legitimate answers from different

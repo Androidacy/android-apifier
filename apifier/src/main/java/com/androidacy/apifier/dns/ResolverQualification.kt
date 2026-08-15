@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReferenceArray
 import kotlinx.coroutines.delay
 
-/** How far the platform resolver has been shown to answer honestly. */
+/** How far the platform resolver has been qualified. */
 internal enum class ResolverTrust {
 
     /** No verdict yet. Transient, and never a reason to refuse anything. */

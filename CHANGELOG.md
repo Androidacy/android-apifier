@@ -56,9 +56,9 @@
 - `ProgressListener` is gone. `progress(sink)` on `Requester` (or
   `download`/`upload`'s `progress` parameter on the deprecated callback surface) takes a
   `MutableSharedFlow<Progress>`, built with `extraBufferCapacity > 0`; see the README's
-  [Progress Tracking](README.md#progress-tracking) section. `Progress` carries no direction.
+  [Progress Tracking](https://github.com/Androidacy/android-apifier/blob/main/README.md#progress-tracking) section. `Progress` carries no direction.
 - `addObserver`/`removeObserver` are deprecated in favour of `ApifierClient.events`, a
-  `SharedFlow<RequestEvent>`; see the README's [Observation](README.md#observation) section.
+  `SharedFlow<RequestEvent>`; see the README's [Observation](https://github.com/Androidacy/android-apifier/blob/main/README.md#observation) section.
 
 ### Streaming and per-call headers
 
@@ -97,7 +97,7 @@
   through your app's Network Security Configuration.
 - `ensureTrustworthyResolver(true)` and `isResolverTrustworthy()` qualify the platform resolver
   instead, and `hostIpPins { ... }` covers a host whose expected addresses you already know; see
-  the README's [Resolver Qualification](README.md#resolver-qualification) section.
+  the README's [Resolver Qualification](https://github.com/Androidacy/android-apifier/blob/main/README.md#resolver-qualification) section.
 - Enforcement refuses every host that resolves to private address space, with
   `ApifierException.DnsUntrusted`. A LAN device, a VPN-reachable staging server, a `.local` name
   and an internal API on RFC 1918 space all fail while it is on, so leave it off for a client that
@@ -112,6 +112,13 @@
 - A redirect to a different host is now refused while the request carries `Authorization` or
   `Proxy-Authorization`, the same way it already was for `Cookie`. A caller that relied on such a
   redirect succeeding needs to authenticate again after following the redirect itself.
+
+### Transport
+
+- `cronet { enableTlsZeroRtt = false }` turns off TLS 1.3 early data, which QUIC has used
+  unconditionally until now. It defaults to `true`, so nothing changes unless you set it, and it
+  has no effect while `enableQuic` is off. Early data has no replay protection, so turn it off if
+  a request replayed by a network attacker would matter to your server.
 
 ### Cookies
 
