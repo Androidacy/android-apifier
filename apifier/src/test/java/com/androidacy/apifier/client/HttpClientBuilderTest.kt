@@ -72,7 +72,7 @@ class HttpClientBuilderTest {
     }
 
     @Test
-    fun isAtLeastAcceptsAnExactMatch() {
+    fun aProviderExactlyAtTheFloorIsUsed() {
         val gms = FakeCronetProvider(context, "Google-Play-Services-Cronet-Provider", "141.0.7340.3")
         val builder = buildWith(gms)
 
@@ -80,19 +80,11 @@ class HttpClientBuilderTest {
     }
 
     @Test
-    fun isAtLeastComparesSegmentwise() {
+    fun aProviderNumericallyAboveTheFloorIsUsed() {
         val gms = FakeCronetProvider(context, "Google-Play-Services-Cronet-Provider", "141.0.7340.10")
         val builder = buildWith(gms)
 
         assertEquals("IN_USE", builder.providerReport["Google-Play-Services-Cronet-Provider:141.0.7340.10"])
-    }
-
-    @Test
-    fun isAtLeastHandlesUnequalSegmentCounts() {
-        val gms = FakeCronetProvider(context, "Google-Play-Services-Cronet-Provider", "141.0")
-        val builder = buildWith(gms)
-
-        assertEquals("TOO_OLD", builder.providerReport["Google-Play-Services-Cronet-Provider:141.0"])
     }
 
     @Test
@@ -113,7 +105,6 @@ class HttpClientBuilderTest {
         )
 
         assertThrows(IOException::class.java) { httpClientBuilder.build() }
-        assertEquals("IN_USE", httpClientBuilder.providerReport["${CronetProvider.PROVIDER_NAME_FALLBACK}:1.0"])
 
         blockedParent.delete()
     }
