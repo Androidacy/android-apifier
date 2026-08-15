@@ -122,7 +122,7 @@ class Cookie private constructor(
 
         /**
          * Parses one `Set-Cookie` header value against the request it answered. Returns null
-         * when the cookie is malformed or fails RFC 6265 s5.3 domain validation -- including
+         * when the cookie is malformed or fails RFC 6265 s5.3 domain validation, including
          * a Domain attribute that names a public suffix the request host isn't itself, which
          * is the control that stops a public-suffix host from setting cookies for every site
          * beneath it.

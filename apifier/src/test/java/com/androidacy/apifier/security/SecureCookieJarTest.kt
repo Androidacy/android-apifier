@@ -425,7 +425,7 @@ class SecureCookieJarTest {
             listOf(cookie("session", "A", domain = "example.com", expiresAt = future)),
         )
 
-        // read domainKey, write domainKey, read index, write index -- no repeat read of the
+        // read domainKey, write domainKey, read index, write index, with no repeat read of the
         // domainKey this save already wrote.
         assertEquals(4, counting.calls.size)
     }
