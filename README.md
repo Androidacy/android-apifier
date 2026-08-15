@@ -121,12 +121,14 @@ val response = client.maxAttempts(1).observe { report(it) }.get("https://api.exa
 
 Each client qualifies the platform's DNS resolver once and caches the verdict until the network
 changes: names that must not resolve, and public names that must resolve to public address space.
-A resolver that cannot answer both consistently is untrustworthy, and the check runs the same way
-regardless of which host the app is about to call. This detects a resolver that is broadly lying or
-hijacked; it does not detect a single hostname being redirected while the rest of DNS behaves
-normally, and it makes no attempt to authenticate any one host's answer against a third-party DNS
+A resolver that cannot answer both consistently is untrustworthy, which catches one that is broadly
+lying or hijacked. A second check then qualifies the host the call is for on its own, requiring
+every address it resolves to be public, so a single hostname being sinkholed is caught while the
+rest of DNS behaves normally. Neither check authenticates an answer against a third-party DNS
 provider, since a geo-DNS fronted host can see different, equally legitimate answers from different
-resolvers.
+resolvers. The consequence of the per-host check is that enforcement refuses any host on private
+address space: a LAN device, a VPN-reachable staging server, a `.local` name and an internal API on
+RFC 1918 space all fail while it is on.
 
 ```kotlin
 val trustworthy = client.isResolverTrustworthy()

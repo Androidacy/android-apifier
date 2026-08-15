@@ -17,6 +17,10 @@
 - `retry { maxAttempts }` and `timeouts { call }` are gone from the DSL. The top-level
   `NetworkConfigBuilder.maxAttempts(count)`/`timeout(duration)` replace them, and are also the
   per-call modifiers on `Requester`.
+- `connectionPool { ... }` and `ConnectionPoolConfig` are gone. Cronet keeps its own connections
+  and exposes no equivalent setting; delete the block.
+- `TimeoutConfig.connect` and `TimeoutConfig.write` are gone. `timeouts { }` keeps `read`, and
+  `timeout(duration)` bounds the whole call including connecting and writing, so set that instead.
 - Failures arrive as `ApifierException` subtypes. Code matching on the old flat
   `IOException("Cronet request failed")` message needs to switch on `errorCode` instead.
 - `ApifierClient` is `Closeable` and owns an engine, thread pools and a network callback. Call
@@ -26,9 +30,30 @@
   called from a `Callback` or a `RequestObserver` of the same client; close from a thread of your
   own instead.
 
+### Types and packages
+
+- The request and response types are apifier's own now: `Request`, `RequestBody`, `Response`,
+  `ResponseBody`, `MediaType`, `MultipartBody`, `Cookie`, `CookieJar`, `Protocol`, `Call` and
+  `Callback` live in `com.androidacy.apifier.http`. Change `import okhttp3.X` to
+  `import com.androidacy.apifier.http.X`; the builders keep the shape you already write.
+- `ApifierClient.client`, which handed out the underlying `OkHttpClient`, is gone. There is no
+  OkHttp client behind the API to reach for.
+- `ProgressResponseBody` is gone. Progress arrives through `progress(sink)`.
+- The `patterns` package is `internal`: `CircuitBreaker`, `ExponentialBackoff` and `BackoffConfig`
+  are no longer part of the public API. The client applies both on your behalf, tuned through
+  `maxAttempts` and the breaker settings in the DSL.
+
+### Retry
+
+- The retried-method set is RFC 9110 s9.2.2's idempotent methods: `GET`, `HEAD`, `PUT`, `DELETE`,
+  `OPTIONS` and `TRACE`. At 2.0.0 it was `GET` and `HEAD` alone, so `retryIdempotentOnly` no longer
+  excludes `PUT` or `DELETE`. If you raised `maxAttempts` above 1, a connection dropped mid-write
+  can now repeat one of those requests: keep `maxAttempts` at 1, or confirm your server handles the
+  four added methods the way the specification requires.
+
 ### Progress and observation
 
-- `ProgressListener` and `ProgressDirection` are gone. `progress(sink)` on `Requester` (or
+- `ProgressListener` is gone. `progress(sink)` on `Requester` (or
   `download`/`upload`'s `progress` parameter on the deprecated callback surface) takes a
   `MutableSharedFlow<Progress>`, built with `extraBufferCapacity > 0`; see the README's
   [Progress Tracking](README.md#progress-tracking) section. `Progress` carries no direction.
@@ -67,14 +92,16 @@
 
 ### DNS trust
 
-- DoH resolution and the OkHttp interceptor are gone. Configure TLS trust through your app's
-  Network Security Configuration.
-- `NetworkConfigBuilder.protectedDomains(...)`, `ApifierClient.protectedDomainStatus` and
-  `ApifierClient.setEnforceProtectedDomains` are gone, along with the DNS comparison behind them.
-  `ensureTrustworthyResolver(true)` and `isResolverTrustworthy()` replace them with
-  host-independent resolver qualification, and `hostIpPins { ... }` covers a host whose expected
-  addresses you already know; see the README's
-  [Resolver Qualification](README.md#resolver-qualification) section.
+- DoH resolution is gone, along with the OkHttp interceptor behind it: `enableDnsOverHttps`,
+  `DohConfig`, `DohProvider` and `ApifierClient.dohActive` no longer exist. Configure TLS trust
+  through your app's Network Security Configuration.
+- `ensureTrustworthyResolver(true)` and `isResolverTrustworthy()` qualify the platform resolver
+  instead, and `hostIpPins { ... }` covers a host whose expected addresses you already know; see
+  the README's [Resolver Qualification](README.md#resolver-qualification) section.
+- Enforcement refuses every host that resolves to private address space, with
+  `ApifierException.DnsUntrusted`. A LAN device, a VPN-reachable staging server, a `.local` name
+  and an internal API on RFC 1918 space all fail while it is on, so leave it off for a client that
+  talks to any of them.
 - `AddressClassifier.classify` no longer classifies a zone-suffixed address (`fe80::1%wlan0`) or an
   IPv4-mapped address (`::ffff:1.2.3.4`); both now return `INVALID`. Strip the zone suffix, or
   unwrap the mapped address to its IPv4 form, before calling `classify` if you need an answer for
