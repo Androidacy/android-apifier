@@ -426,7 +426,7 @@ class ApifierClientTest {
     /** Production change that fails this: dropping the callback marker from observation dispatch. */
     @Test
     @Suppress("DEPRECATION")
-    fun closeFromAnEventCollectorIsRefused() {
+    fun closeFromAnObserverIsRefused() {
         val client = clientOf(FakeEngine())
         val thrown = AtomicReference<Throwable?>()
         val attempted = CountDownLatch(1)
@@ -449,7 +449,7 @@ class ApifierClientTest {
      */
     @Test
     @Suppress("DEPRECATION")
-    fun closeFromAnEventCollectorDoesNotHang() {
+    fun closeFromAnObserverDoesNotHang() {
         val engine = FakeEngine()
         val client = clientOf(engine)
         val attempted = CountDownLatch(1)
@@ -1000,10 +1000,19 @@ class ApifierClientTest {
     /** Fails if the global run, or the accessor it publishes through, is gated on the enforcement flag. */
     @Test
     fun qualificationRunsWithoutEnforcementOptIn() {
-        val client = clientOf(FakeEngine())
+        val probes = Executors.newCachedThreadPool()
+        // Every junk label answers, so the verdict can only be UNTRUSTED, and only a run that
+        // happened can produce it.
+        val client = ApifierClient(
+            context,
+            NetworkConfig(ensureTrustworthyResolver = false),
+            FakeEngine(),
+            qualification = qualificationOn(probes) { listOf(PUBLIC_ADDRESS) }
+        )
 
-        assertTrue(runBlocking { client.isResolverTrustworthy() })
+        assertFalse(runBlocking { client.isResolverTrustworthy() })
         client.close()
+        probes.shutdownNow()
     }
 
     /** Fails if construction awaits the first verdict. */

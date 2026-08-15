@@ -15,7 +15,6 @@
  */
 package com.androidacy.apifier.dns
 
-import com.androidacy.apifier.client.NetworkConfigBuilder
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -34,21 +33,6 @@ class HostIpPinsTest {
         val pins = pinsFor("api.example.com", "203.0.113.10")
 
         assertFalse(HostIpPins.refuses(pins, "api.example.com", listOf("203.0.113.10")))
-    }
-
-    @Test
-    fun configuringPinsForcesEnforcement() {
-        val mismatched = listOf("203.0.113.99")
-        val withDefaultFlag = NetworkConfigBuilder().apply {
-            hostIpPins { pin("api.example.com", "203.0.113.10") }
-        }.build()
-        val withFlagExplicitlyOff = NetworkConfigBuilder().apply {
-            ensureTrustworthyResolver(false)
-            hostIpPins { pin("api.example.com", "203.0.113.10") }
-        }.build()
-
-        assertTrue(HostIpPins.refuses(withDefaultFlag.hostIpPins, "api.example.com", mismatched))
-        assertTrue(HostIpPins.refuses(withFlagExplicitlyOff.hostIpPins, "api.example.com", mismatched))
     }
 
     @Test

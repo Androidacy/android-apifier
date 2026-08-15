@@ -644,14 +644,12 @@ private class BudgetedBody(
 
     // Built eagerly, not memoized on first source() call: a lazily-created wrapper race would let
     // two callers each start buffering the same underlying source, silently splitting its bytes.
-    @Suppress("DEPRECATION")
     private val bounded = bounding(body.source()).buffer()
 
     override fun contentType(): MediaType? = body.contentType()
 
     override fun contentLength(): Long = body.contentLength()
 
-    @Suppress("OVERRIDE_DEPRECATION")
     override fun source(): BufferedSource = bounded
 
     override fun close() {
@@ -689,7 +687,6 @@ internal class ProgressBody(
 
     // Built eagerly for the same reason as BudgetedBody.bounded: a lazy race would let two
     // callers each buffer the same underlying source.
-    @Suppress("DEPRECATION")
     private val counted = counting(body.source()).buffer()
     private val totalRead = AtomicLong(0L)
     private val lastReported = AtomicLong(-1L)
@@ -699,7 +696,6 @@ internal class ProgressBody(
 
     override fun contentLength(): Long = body.contentLength()
 
-    @Suppress("OVERRIDE_DEPRECATION")
     override fun source(): BufferedSource = counted
 
     private fun counting(source: Source): Source = object : ForwardingSource(source) {
