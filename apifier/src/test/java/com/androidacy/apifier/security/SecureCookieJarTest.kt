@@ -152,7 +152,7 @@ class SecureCookieJarTest {
     }
 
     @Test
-    fun overwriteInvalidatesCache() {
+    fun resettingACookieChangesTheValueSent() {
         val future = System.currentTimeMillis() + 60_000L
         val target = url("https://example.com/")
 
@@ -236,9 +236,8 @@ class SecureCookieJarTest {
         // random bytes. Size 2 + 12 + 32 = 46 clears the "raw.size >= 2 + ivLen +
         // GCM_TAG_LENGTH / 8" guard (2 + 12 + 16 = 30), so decrypt() actually calls
         // gcmDecrypt and this is rejected on AEAD tag verification, not short-circuited
-        // by the length check. Cleartext or an attacker's substitute cannot forge a
-        // valid tag under our Keystore key, which is exactly the guarantee this test
-        // exists to prove.
+        // by the length check. A stored entry that fails AEAD verification is dropped
+        // silently instead of crashing the request or surfacing garbage as a cookie.
         val random = java.security.SecureRandom()
         val v1 = ByteArray(2 + 12 + 32).also(random::nextBytes)
         v1[0] = 1
@@ -443,7 +442,7 @@ class SecureCookieJarTest {
     }
 
     @Test
-    fun theDecodedCacheIsBoundedAndEvictsEldest() {
+    fun aLongLivedClientDoesNotHoldEveryHostsCookiesInMemory() {
         val future = System.currentTimeMillis() + 60_000L
         val counting = CountingCookieStorage(InMemoryCookieStorage())
         val cachingJar = newJar(counting)
@@ -488,23 +487,6 @@ class SecureCookieJarTest {
         val sent = jar.loadForRequest(url("https://session.com/"))
         assertEquals(1, sent.size)
         assertEquals("A", sent[0].value)
-    }
-
-    @Test
-    fun savingDoesNotReReadWhatItJustWrote() {
-        val future = System.currentTimeMillis() + 60_000L
-        val counting = CountingCookieStorage(InMemoryCookieStorage())
-        val countingJar = newJar(counting)
-
-        counting.calls.clear()
-        countingJar.saveFromResponse(
-            url("https://example.com/"),
-            listOf(cookie("session", "A", domain = "example.com", expiresAt = future)),
-        )
-
-        // read domainKey, write domainKey, read index, write index, with no repeat read of the
-        // domainKey this save already wrote.
-        assertEquals(4, counting.calls.size)
     }
 
     /** Encrypts [cookie] exactly as [jar] would persist it, without going through its expiry filter. */

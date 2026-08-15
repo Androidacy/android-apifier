@@ -40,7 +40,7 @@ class AddressClassifierTest {
     }
 
     @Test
-    fun classifiesRangesTheOldPredicatesMissed() {
+    fun classifiesCgnatAndUlaRangesAndTheirBoundaries() {
         assertEquals(AddressCategory.CGNAT, AddressClassifier.classify("100.64.0.1"))
         assertEquals(AddressCategory.CGNAT, AddressClassifier.classify("100.127.255.255"))
         assertEquals(AddressCategory.PUBLIC, AddressClassifier.classify("100.63.255.255"))
@@ -76,7 +76,7 @@ class AddressClassifierTest {
     }
 
     @Test
-    fun safeHostnameRejectsWhatTheWireCodecCannotEncode() {
+    fun safeHostnameRejectsEmptyAndOverlongLabels() {
         assertFalse("a trailing dot leaves an empty label", AddressClassifier.isSafeHostname("example.com."))
         assertFalse(AddressClassifier.isSafeHostname(".example.com"))
         assertFalse(AddressClassifier.isSafeHostname("a..b"))

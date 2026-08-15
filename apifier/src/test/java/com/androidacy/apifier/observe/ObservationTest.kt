@@ -186,7 +186,7 @@ class ObservationTest {
      * never clears, and close() burns the full close timeout waiting for a number that can't reach zero.
      */
     @Test
-    fun closeDoesNotStrandCountOnEventsDroppedByASlowObserver() {
+    fun closeIsPromptAfterEventsWereDroppedBehindASlowObserver() {
         val observation = Observation()
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)

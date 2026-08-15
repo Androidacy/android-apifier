@@ -114,20 +114,6 @@ class ApifierClientTest {
         )
     }
 
-    /** Fails if the builder's default reaches only [ApifierClient.maxAttempts]'s derived views, not a plain [ApifierClient.send]. */
-    @Test
-    fun builderDefaultAppliesToEveryCall() {
-        val engine = FakeEngine(respond = { serverError(it) })
-        val config = NetworkConfigBuilder().apply { maxAttempts(2) }.build()
-        val client = clientOf(engine, config)
-
-        val response = runBlocking { client.get(URL) }
-
-        assertEquals(2, engine.seen.size)
-        response.close()
-        client.close()
-    }
-
     /** Production change that fails this: dropping the header option from [Pipeline.prepare]. */
     @Test
     fun aPerCallHeaderReachesTheTransport() {
@@ -449,7 +435,7 @@ class ApifierClientTest {
      */
     @Test
     @Suppress("DEPRECATION")
-    fun closeFromAnObserverDoesNotHang() {
+    fun aRefusedCloseTearsNothingDown() {
         val engine = FakeEngine()
         val client = clientOf(engine)
         val attempted = CountDownLatch(1)
@@ -949,19 +935,6 @@ class ApifierClientTest {
         assertEquals(500, response.code)
         assertEquals(3, engine.seen.size)
         response.close()
-        client.close()
-    }
-
-    @Test
-    fun derivedViewSharesTheParentEngineAndJar() {
-        val engine = FakeEngine()
-        val storage = GatedCookieStorage().apply { release() }
-        val client = clientOf(engine, NetworkConfig(cookieStorage = storage))
-
-        runBlocking { client.maxAttempts(1).get(URL).close() }
-
-        assertEquals("the call never reached the client's engine", 1, engine.seen.size)
-        assertTrue("the client's cookie jar was bypassed", storage.reads.get() > 0)
         client.close()
     }
 

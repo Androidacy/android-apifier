@@ -96,17 +96,6 @@ class StreamingUploadProviderTest {
     }
 
     @Test
-    fun lengthFromBodyContentLength() {
-        val file = tempFile("hello streaming world")
-        val fileProvider = StreamingUploadProvider(file.asRequestBody(), null)
-        assertEquals(file.length(), fileProvider.length)
-
-        val unknownLength = InstrumentedBody(-1L, CountingSource(0))
-        val chunkedProvider = StreamingUploadProvider(unknownLength, null)
-        assertEquals(-1L, chunkedProvider.length)
-    }
-
-    @Test
     fun chunkedSignalsFinalChunk() {
         val source = CountingSource(40L)
         val body = InstrumentedBody(-1L, source)

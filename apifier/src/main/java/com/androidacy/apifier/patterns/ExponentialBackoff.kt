@@ -55,7 +55,4 @@ internal class ExponentialBackoff(private val config: BackoffConfig = BackoffCon
 
         return (delay + jitter).coerceAtMost(config.maxDelayMs)
     }
-
-    /** Whether [attemptNumber] hasn't exceeded the configured max. */
-    fun shouldRetry(attemptNumber: Int): Boolean = attemptNumber < config.maxAttempts
 }

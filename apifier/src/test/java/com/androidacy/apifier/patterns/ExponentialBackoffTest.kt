@@ -59,13 +59,6 @@ class ExponentialBackoffTest {
     }
 
     @Test
-    fun shouldRetryBoundary() {
-        val backoff = ExponentialBackoff()
-        assertTrue(backoff.shouldRetry(4))
-        assertFalse(backoff.shouldRetry(5))
-    }
-
-    @Test
     fun configRejectsInvalidParams() {
         assertThrows(IllegalArgumentException::class.java) {
             BackoffConfig(baseDelayMs = 0L)

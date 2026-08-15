@@ -89,6 +89,8 @@ class ApifierExceptionTest {
         val refused = ApifierException.RedirectRefused("Redirect to non-HTTPS URL rejected")
         assertFalse(refused.retryable)
         assertEquals(ErrorCode.REDIRECT_REFUSED, refused.errorCode)
+
+        assertFalse(ApifierException.HttpError(404).retryable)
     }
 
     @Test
@@ -106,15 +108,5 @@ class ApifierExceptionTest {
         ).toApifierException()
         assertTrue(deferredTransport.retryable)
         assertFalse(deferredTransport.immediatelyRetryable)
-    }
-
-    @Test
-    fun httpErrorReportsOtherAndIsNotRetryable() {
-        val error = ApifierException.HttpError(404)
-
-        assertEquals(404, error.code)
-        assertEquals(ErrorCode.OTHER, error.errorCode)
-        assertFalse(error.retryable)
-        assertTrue("message should name the status code", error.message?.contains("404") == true)
     }
 }

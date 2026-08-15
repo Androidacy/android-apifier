@@ -93,7 +93,7 @@ class ResolverQualificationTest {
     }
 
     @Test
-    fun oneLaneFailureDoesNotDiscardTheOtherLaneResult() {
+    fun aProbeThatNeverAnswersDoesNotStallOrSpoilTheRound() {
         val junkCalls = AtomicInteger()
         val neverReleased = CountDownLatch(1)
         val start = System.nanoTime()

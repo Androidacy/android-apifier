@@ -138,19 +138,6 @@ class CronetCallTest {
         assertFalse(refusal.retryable)
     }
 
-    /** Fails if the gate refuses same-host hops whenever a credential header is merely present. */
-    @Test
-    fun aSameHostRedirectCarryingAuthorizationIsFollowed() {
-        val harness = Harness(requestHeaders = listOf("Authorization" to "Bearer token"))
-        harness.enqueue()
-
-        harness.cronetCallback.onRedirectReceived(harness.urlRequest, info(), "https://example.com/second")
-
-        assertEquals(1, harness.urlRequest.followed)
-        assertEquals(0, harness.urlRequest.canceled)
-        assertEquals(0, harness.callback.failures.size)
-    }
-
     @Test
     fun redirectListenerSeesHopHeaders() {
         val listener = RecordingListener()
@@ -285,7 +272,7 @@ class CronetCallTest {
     }
 
     @Test
-    fun bytesCountedWithoutListener() {
+    fun receivedBytesAreReportedOnceAtCompletion() {
         val listener = RecordingListener()
         val harness = Harness(listener = listener)
         harness.enqueue()

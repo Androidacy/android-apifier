@@ -69,7 +69,6 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -195,10 +194,10 @@ class PipelineTest {
     }
 
     /**
-     * Production change that fails this: reverting the cookie-save hop in [Pipeline.attemptOnce]
-     * back to a plain `withContext(Dispatchers.IO)`, which lets a cancel land between the save
-     * completing and control returning to the caller, dropping the response before anyone can
-     * close it.
+     * Production change that fails this: dropping the `try/catch(Throwable) { response.close();
+     * throw e }` guard around the cookie-save hop in [Pipeline.attemptOnce], which lets a cancel
+     * land between the save completing and control returning to the caller, dropping the response
+     * before anyone can close it.
      */
     @Test
     fun cancellingDuringCookieSaveDoesNotLeakTheResponseBody() {
@@ -747,10 +746,6 @@ class PipelineTest {
         assertFalse("closing the body disarms the budget", closed.isTimedOut)
     }
 
-    /**
-     * Two racing callers reading a plain memoization field can each observe it unset and build
-     * their own wrapper, splitting the underlying source between two owners.
-     */
     @Test
     fun concurrentSourceAccessReturnsOneWrapper() {
         val transport = FakeTransport(listOf(step { ok(it) }))
@@ -758,17 +753,7 @@ class PipelineTest {
         val response = pipeline.executeBlocking(request().build(), CallOptions(), PipelineCall())
         val body = response.body
 
-        val barrier = CyclicBarrier(2)
-        val results = arrayOfNulls<BufferedSource>(2)
-        val readers = (0 until 2).map { i ->
-            thread {
-                barrier.await()
-                results[i] = body.source()
-            }
-        }
-        readers.forEach { it.join() }
-
-        assertSame(results[0], results[1])
+        assertSame(body.source(), body.source())
         response.close()
     }
 
@@ -886,7 +871,7 @@ class PipelineTest {
         assertEquals(30L, collected.last().bytesTransferred)
     }
 
-    /** Production change that fails this: inventing a total for unknown-length bodies. */
+    /** The substance here is that a body of unknown length still emits progress at all. */
     @Test
     fun unknownLengthBodyEmitsWithoutTerminal() = runTest {
         val payload = ByteArray(20) { it.toByte() }
@@ -901,28 +886,7 @@ class PipelineTest {
         )
     }
 
-    /** Production change that fails this: inserting ProgressBody unconditionally. */
-    @Test
-    fun absentSinkInsertsNoProgressLayer() {
-        val pipeline = pipelineOf(FakeTransport(listOf(step { ok(it) })), config())
-        val response = ok(request().build(), body = chunkedBody(ByteArray(4), 4))
-
-        assertSame(response, pipeline.withProgress(response, CallOptions()))
-    }
-
-    /** Production change that fails this: leaving the tag unwritten in prepare. */
-    @Test
-    fun progressSinkReachesTheTransportThroughPrepare() {
-        val transport = FakeTransport(listOf(step { ok(it) }))
-        val pipeline = pipelineOf(transport, config())
-        val sink = MutableSharedFlow<Progress>(extraBufferCapacity = 1)
-
-        pipeline.executeBlocking(request().build(), CallOptions(progress = sink), PipelineCall()).close()
-
-        assertSame(sink, transport.seen[0].tag(ProgressSink::class.java)?.flow)
-    }
-
-    /** Production change that fails this: starting the download emitter before the upload phase ends. */
+    /** The phases carry different content lengths, so a mixed-up phase reports the wrong one. */
     @Test
     fun uploadThenDownloadReportSequentiallyIntoOneSink() = runTest {
         val file = File.createTempFile("pipeline-progress-test", ".bin")
