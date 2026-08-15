@@ -51,10 +51,17 @@ fun NetworkConfigBuilder.hostIpPins(block: HostIpPinsBuilder.() -> Unit) {
 /** Compares a host's declared pins against a resolved answer, on byte form. */
 internal object HostIpPins {
 
-    /** True when [host] has pins declared and none of [resolvedAddresses] is among them. */
+    /**
+     * True when [host] has pins declared and any of [resolvedAddresses] is not among them. A pin
+     * is a statement that the declared set is the whole set, so an answer mixing a declared
+     * address with an undeclared one is an answer the caller did not sanction. An empty answer,
+     * and an address that does not parse, refuse for the same reason.
+     */
     fun refuses(pins: Map<String, Set<String>>, host: String, resolvedAddresses: List<String>): Boolean {
         val declared = pins[host.lowercase()]?.mapNotNull(::canonical)?.toSet() ?: return false
-        return resolvedAddresses.mapNotNull(::canonical).none { it in declared }
+        val resolved = resolvedAddresses.mapNotNull(::canonical)
+        if (resolved.size != resolvedAddresses.size) return true
+        return resolved.isEmpty() || !resolved.all { it in declared }
     }
 
     /** Byte form, so `2606:4700::1111` and its expanded spelling compare equal. */

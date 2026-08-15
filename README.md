@@ -146,10 +146,14 @@ hostIpPins {
 ```
 
 Declaring any pin turns on enforcement for the whole client, regardless of
-`ensureTrustworthyResolver`. A pinned host whose resolved address is not among the declared ones
-refuses the call with `ApifierException.DnsUntrusted`. Pins are unsuited to a host behind geo-DNS
-fronting, where legitimate answers differ by resolver vantage point, and a pin outliving an address
-migration refuses every call to that host until the pin is updated.
+`ensureTrustworthyResolver`. The declared set is the whole set: a pinned host is refused with
+`ApifierException.DnsUntrusted` unless every address it resolves to is among the declared ones, so
+an answer adding an undeclared address to a declared one is refused too. Pins are unsuited to a
+host behind geo-DNS fronting, where legitimate answers differ by resolver vantage point, and a pin
+outliving an address migration refuses every call to that host until the pin is updated.
+
+The pin is checked against a resolution this library performs. Cronet resolves the host again for
+the connection, so a pin narrows the window without closing it.
 
 ## Errors
 

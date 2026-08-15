@@ -36,6 +36,27 @@ class HostIpPinsTest {
     }
 
     @Test
+    fun aPinnedHostResolvingPartlyOutsideItsPinsIsRefused() {
+        val pins = pinsFor("api.example.com", "203.0.113.10")
+
+        assertTrue(HostIpPins.refuses(pins, "api.example.com", listOf("203.0.113.10", "198.51.100.5")))
+    }
+
+    @Test
+    fun aPinnedHostResolvingToNothingIsRefused() {
+        val pins = pinsFor("api.example.com", "203.0.113.10")
+
+        assertTrue(HostIpPins.refuses(pins, "api.example.com", emptyList()))
+    }
+
+    @Test
+    fun anUnparseableAddressAlongsideAPinnedOneIsRefused() {
+        val pins = pinsFor("api.example.com", "203.0.113.10")
+
+        assertTrue(HostIpPins.refuses(pins, "api.example.com", listOf("203.0.113.10", "not-an-address")))
+    }
+
+    @Test
     fun ipv6PinsCompareOnByteForm() {
         val pins = pinsFor("edge.example.com", "2606:4700:0000:0000:0000:0000:0000:1111")
 
