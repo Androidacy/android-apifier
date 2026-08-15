@@ -2,6 +2,7 @@ plugins {
     id("com.android.library")
     id("org.jetbrains.dokka")
     id("org.jetbrains.dokka-javadoc")
+    id("org.jetbrains.kotlin.plugin.serialization")
     `maven-publish`
 }
 
@@ -71,11 +72,17 @@ dependencies {
     // DataStore: only needed by consumers using DataStoreCookieStorage
     compileOnly("androidx.datastore:datastore-preferences:1.2.1")
 
+    // kotlinx.serialization: only needed by consumers using ResponseBody.json
+    compileOnly("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+    compileOnly("org.jetbrains.kotlinx:kotlinx-serialization-json-okio:1.11.0")
+
     // Tests
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.16.1")
     testImplementation("androidx.test:core:1.7.0")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json-okio:1.11.0")
 }
 
 val dokkaJavadocJar = tasks.register<Jar>("dokkaJavadocJar") {

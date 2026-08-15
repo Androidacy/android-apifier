@@ -13,3 +13,7 @@
 # is compileOnly. A consumer that does not depend on DataStore has no such classes for R8 to
 # resolve, and full mode treats the missing references as errors.
 -dontwarn androidx.datastore.**
+
+# BodyDecoders.json is compiled against kotlinx.serialization, which is compileOnly for the same
+# reason: a consumer without it has no such classes for R8 to resolve.
+-dontwarn kotlinx.serialization.**

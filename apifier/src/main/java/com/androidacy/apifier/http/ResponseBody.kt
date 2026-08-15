@@ -43,6 +43,7 @@ abstract class ResponseBody : Closeable {
     /** The length announced by the response, or -1 when the length was not known. */
     abstract fun contentLength(): Long
 
+    @PublishedApi
     internal abstract fun source(): BufferedSource
 
     override fun close() {
