@@ -546,10 +546,13 @@ class ApifierClient internal constructor(
 /**
  * A view of [client] carrying one call's [options]. Engine, pipeline, cookie jar, breakers and
  * scope stay the client's, so a view is cheap enough to build for one call.
+ *
+ * Internal rather than private: the [Requester.header] extension derives a new view directly,
+ * the same way the modifiers below do.
  */
-private class DerivedRequester(
-    private val client: ApifierClient,
-    private val options: CallOptions
+internal class DerivedRequester(
+    internal val client: ApifierClient,
+    internal val options: CallOptions
 ) : Requester {
 
     override suspend fun send(request: Request): Response = client.send(request, options)

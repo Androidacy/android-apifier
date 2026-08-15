@@ -72,7 +72,9 @@ internal data class CallOptions(
     @Suppress("DEPRECATION")
     val observer: RequestObserver? = null,
     /** Sink for this call's byte counts; see [Requester.progress] for its contract. */
-    val progress: MutableSharedFlow<Progress>? = null
+    val progress: MutableSharedFlow<Progress>? = null,
+    /** Headers this call carries; see the [Requester.header] extension for precedence. */
+    val headers: Headers = Headers.Builder().build()
 )
 
 /** Carries a call's progress sink to the transport through [Request]'s tag mechanism. */
@@ -354,22 +356,31 @@ internal class Pipeline(
         error("retry loop ended without an outcome")
     }
 
-    /** Builds the request the transport will see: global headers first, then jar cookies. */
+    /** Builds the request the transport will see: call headers, then global headers, then jar cookies. */
     private suspend fun prepare(request: Request, options: CallOptions): Request {
         val builder = request.newBuilder()
-        applyGlobalHeaders(request, builder)
+        applyCallHeaders(request, builder, options)
+        applyGlobalHeaders(request, builder, options)
         attachCookies(request, builder)
         options.progress?.let { builder.tag(ProgressSink::class.java, ProgressSink(it)) }
         return builder.build()
     }
 
-    /** Per-request headers win: a name the request already carries is left alone. */
-    private fun applyGlobalHeaders(request: Request, builder: Request.Builder) {
+    /** Per-call headers win over the client-wide ones; a name the request already carries is left alone. */
+    private fun applyCallHeaders(request: Request, builder: Request.Builder, options: CallOptions) {
+        for (index in 0 until options.headers.size) {
+            val name = options.headers.name(index)
+            if (request.header(name) == null) builder.header(name, options.headers.value(index))
+        }
+    }
+
+    /** A name the request or a per-call header already carries is left alone. */
+    private fun applyGlobalHeaders(request: Request, builder: Request.Builder, options: CallOptions) {
         for ((name, value) in config.headers) {
-            if (request.header(name) == null) builder.header(name, value)
+            if (request.header(name) == null && options.headers[name] == null) builder.header(name, value)
         }
         for ((name, provider) in config.dynamicHeaders) {
-            if (request.header(name) == null) builder.header(name, provider())
+            if (request.header(name) == null && options.headers[name] == null) builder.header(name, provider())
         }
     }
 

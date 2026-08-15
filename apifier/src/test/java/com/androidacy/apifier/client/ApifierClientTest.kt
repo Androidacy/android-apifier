@@ -128,6 +128,74 @@ class ApifierClientTest {
         client.close()
     }
 
+    /** Production change that fails this: dropping the header option from [Pipeline.prepare]. */
+    @Test
+    fun aPerCallHeaderReachesTheTransport() {
+        val engine = FakeEngine()
+        val client = clientOf(engine)
+
+        val response = runBlocking { client.header("X-Trace", "abc").get(URL) }
+
+        assertEquals("abc", engine.seen.single().header("X-Trace"))
+        response.close()
+        client.close()
+    }
+
+    /** Production change that fails this: applying [NetworkConfig.headers] after per-call headers. */
+    @Test
+    fun aPerCallHeaderOverridesTheClientWideOne() {
+        val engine = FakeEngine()
+        val config = NetworkConfigBuilder().apply { header("X-Trace", "global") }.build()
+        val client = clientOf(engine, config)
+
+        val response = runBlocking { client.header("X-Trace", "per-call").get(URL) }
+
+        assertEquals("per-call", engine.seen.single().header("X-Trace"))
+        response.close()
+        client.close()
+    }
+
+    /** Production change that fails this: reversing the precedence between a request header and a per-call one. */
+    @Test
+    fun aRequestHeaderOverridesAPerCallOne() {
+        val engine = FakeEngine()
+        val client = clientOf(engine)
+        val request = Request.Builder().url(URL).header("X-Trace", "on-request").get().build()
+
+        val response = runBlocking { client.header("X-Trace", "per-call").send(request) }
+
+        assertEquals("on-request", engine.seen.single().header("X-Trace"))
+        response.close()
+        client.close()
+    }
+
+    /** Production change that fails this: storing the per-call header on the client instead of the derived view. */
+    @Test
+    fun aPerCallHeaderDoesNotLeakToOtherCalls() {
+        val engine = FakeEngine()
+        val client = clientOf(engine)
+
+        val first = runBlocking { client.header("X-Trace", "abc").get(URL) }
+        val second = runBlocking { client.get(URL) }
+
+        assertNull(engine.seen[1].header("X-Trace"))
+        first.close()
+        second.close()
+        client.close()
+    }
+
+    /** Production change that fails this: bypassing header validation for the per-call value. */
+    @Test
+    fun anInvalidPerCallHeaderValueIsRejected() {
+        val client = clientOf(FakeEngine())
+
+        assertThrows(IllegalArgumentException::class.java) {
+            client.header("X-Trace", "line1\nline2")
+        }
+
+        client.close()
+    }
+
     /** Fails if the builder default is read instead of the derived view's override. */
     @Test
     fun perCallModifierOverridesTheBuilderDefault() {

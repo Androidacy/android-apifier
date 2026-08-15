@@ -15,6 +15,7 @@
  */
 package com.androidacy.apifier.client
 
+import com.androidacy.apifier.http.Headers
 import com.androidacy.apifier.http.MediaType.Companion.toMediaTypeOrNull
 import com.androidacy.apifier.http.MultipartBody
 import com.androidacy.apifier.http.Request
@@ -138,4 +139,23 @@ interface Requester {
     /** A view whose calls report their one terminal event to [observer]. */
     @Suppress("DEPRECATION")
     fun observe(observer: RequestObserver): Requester
+}
+
+/**
+ * A view whose calls carry the header `[name]: [value]`.
+ *
+ * A header the [Request] passed to [Requester.send] already carries wins over this; this wins
+ * over a same-named header configured client-wide. Calling `header` again with the same [name]
+ * replaces the earlier value.
+ *
+ * @throws IllegalArgumentException [name] or [value] is not a legal header field.
+ */
+fun Requester.header(name: String, value: String): Requester {
+    val (client, current) = when (this) {
+        is ApifierClient -> this to CallOptions()
+        is DerivedRequester -> this.client to this.options
+        else -> error("header() is only supported for views produced by ApifierClient")
+    }
+    val headers = current.headers.newBuilder().set(name, value).build()
+    return DerivedRequester(client, current.copy(headers = headers))
 }
