@@ -1,3 +1,6 @@
+import org.gradle.api.credentials.HttpHeaderCredentials
+import org.gradle.authentication.http.HttpHeaderAuthentication
+
 plugins {
     id("com.android.library")
     id("org.jetbrains.dokka")
@@ -98,7 +101,7 @@ afterEvaluate {
                 artifact(dokkaJavadocJar)
                 groupId = "com.github.Androidacy"
                 artifactId = "android-apifier"
-                version = "3.0.0"
+                version = "3.0.1"
 
                 pom {
                     name.set("Android Apifier")
@@ -110,6 +113,20 @@ afterEvaluate {
                             url.set("http://www.apache.org/licenses/LICENSE-2.0.txt")
                         }
                     }
+                }
+            }
+        }
+        repositories {
+            maven {
+                name = "Gitea"
+                url = uri("https://git.androidacy.com/api/packages/Androidacy/maven")
+                // Gitea's Maven registry authenticates by header, not by username/password.
+                credentials(HttpHeaderCredentials::class) {
+                    name = "Authorization"
+                    value = System.getenv("GITEA_TOKEN")?.let { "token $it" }
+                }
+                authentication {
+                    create<HttpHeaderAuthentication>("header")
                 }
             }
         }

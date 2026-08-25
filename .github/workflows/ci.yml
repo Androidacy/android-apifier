@@ -36,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      packages: write
     steps:
       # Full history so the tag-existence check can see every tag.
       - uses: actions/checkout@v7.0.0
@@ -68,3 +69,22 @@ jobs:
             --target "${{ github.sha }}" \
             --generate-notes \
             --notes "See release notes at https://github.com/${{ github.repository }}/blob/${{ steps.ver.outputs.version }}/CHANGELOG.md"
+
+      - if: steps.ver.outputs.release == 'true'
+        uses: actions/setup-java@v5.4.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - if: steps.ver.outputs.release == 'true'
+        uses: android-actions/setup-android@v4.0.1
+        with:
+          packages: 'platforms;android-37.0'
+
+      - if: steps.ver.outputs.release == 'true'
+        uses: gradle/actions/setup-gradle@v6.2.0
+
+      - if: steps.ver.outputs.release == 'true'
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: ./gradlew :apifier:publishReleasePublicationToGiteaRepository
