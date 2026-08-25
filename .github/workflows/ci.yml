@@ -61,16 +61,6 @@ jobs:
           fi
 
       - if: steps.ver.outputs.release == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${{ steps.ver.outputs.version }}" \
-            --title "${{ steps.ver.outputs.version }}" \
-            --target "${{ github.sha }}" \
-            --generate-notes \
-            --notes "See release notes at https://github.com/${{ github.repository }}/blob/${{ steps.ver.outputs.version }}/CHANGELOG.md"
-
-      - if: steps.ver.outputs.release == 'true'
         uses: actions/setup-java@v5.4.0
         with:
           distribution: temurin
@@ -88,3 +78,13 @@ jobs:
         env:
           GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
         run: ./gradlew :apifier:publishReleasePublicationToGiteaRepository
+
+      - if: steps.ver.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.ver.outputs.version }}" \
+            --title "${{ steps.ver.outputs.version }}" \
+            --target "${{ github.sha }}" \
+            --generate-notes \
+            --notes "See release notes at https://github.com/${{ github.repository }}/blob/${{ steps.ver.outputs.version }}/CHANGELOG.md"

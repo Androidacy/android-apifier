@@ -1,7 +1,6 @@
 # Android Apifier
 
 [![Release](https://img.shields.io/github/v/release/Androidacy/android-apifier?sort=semver)](https://github.com/Androidacy/android-apifier/releases/latest)
-[![](https://jitpack.io/v/Androidacy/android-apifier.svg)](https://jitpack.io/#Androidacy/android-apifier)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 HTTP and API networking library for Android, built directly on Cronet.
@@ -33,11 +32,11 @@ that exist because they are the only ones Cronet actually enforces.
 
 ## Installation
 
-Add JitPack repository:
+Add the Androidacy Maven registry:
 
 ```gradle
 repositories {
-    maven { url 'https://jitpack.io' }
+    maven { url 'https://git.androidacy.com/api/packages/Androidacy/maven' }
 }
 ```
 
@@ -45,13 +44,15 @@ Add dependency:
 
 ```gradle
 dependencies {
-    implementation 'com.github.Androidacy:android-apifier:3.0.0'
+    implementation 'com.github.Androidacy:android-apifier:3.0.1'
 }
 ```
 
+Releases up to 3.0.0 are also on JitPack. Anything newer is published only to the registry above.
+
 ## Documentation
 
-API documentation is available at [javadoc.jitpack.io](https://javadoc.jitpack.io/com/github/Androidacy/android-apifier/latest/javadoc/)
+API documentation ships as the `javadoc` artifact alongside each release.
 
 ## Usage
 

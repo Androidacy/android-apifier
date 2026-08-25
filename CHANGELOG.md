@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.0.1
+
+### Fixed
+
+- Uploads with a declared content length no longer fail once the whole body has been sent. The
+  provider treated a source that ran dry after delivering every declared byte as a truncated body,
+  so a request could fail with `body ended after N of N bytes` after succeeding on the wire.
+
+### Distribution
+
+- Releases are published to `https://git.androidacy.com/api/packages/Androidacy/maven`. JitPack
+  still serves 3.0.0 and earlier.
+
 ## 3.0.0
 
 ### Call surface
