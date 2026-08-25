@@ -54,8 +54,9 @@ internal class StreamingUploadProvider(
         // A body that advertised a known length but ran dry before delivering it (a file
         // truncated after contentLength() was read, an over-reporting custom body) has nothing
         // valid left to hand back; a zero-byte non-final read is not a legal chunked-only signal
-        // here, so this fails the upload instead of reporting a false success.
-        if (exhausted && total >= 0) {
+        // here, so this fails the upload instead of reporting a false success. A body that ran
+        // dry after delivering exactly total bytes just reached the end Cronet already expects.
+        if (exhausted && total >= 0 && sent < total) {
             uploadDataSink.onReadError(IOException("body ended after $sent of $total bytes"))
             return
         }

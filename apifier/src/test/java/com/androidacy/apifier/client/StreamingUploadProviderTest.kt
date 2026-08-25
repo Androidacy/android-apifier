@@ -96,6 +96,20 @@ class StreamingUploadProviderTest {
     }
 
     @Test
+    fun fullyDeliveredKnownLengthBodySucceedsOnFinalExhaustedRead() {
+        val body = InstrumentedBody(32L, CountingSource(32L))
+        val provider = StreamingUploadProvider(body, null)
+        val sink = RecordingSink()
+
+        provider.read(sink, ByteBuffer.allocate(16))
+        provider.read(sink, ByteBuffer.allocate(16))
+        provider.read(sink, ByteBuffer.allocate(16)) // source now exhausted, all 32 bytes already delivered
+
+        assertNull("a body that delivered its full declared length must not read-error", sink.readError)
+        assertEquals(listOf(false, false, false), sink.readSucceededCalls)
+    }
+
+    @Test
     fun chunkedSignalsFinalChunk() {
         val source = CountingSource(40L)
         val body = InstrumentedBody(-1L, source)
