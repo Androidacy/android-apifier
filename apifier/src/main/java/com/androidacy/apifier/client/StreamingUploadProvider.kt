@@ -60,9 +60,10 @@ internal class StreamingUploadProvider(
             uploadDataSink.onReadError(IOException("body ended after $sent of $total bytes"))
             return
         }
-        if (!exhausted) {
-            transfer.read(byteBuffer)
-            sent += read
+        // Buffer.read(ByteBuffer) drains only its head segment (<=8192 bytes) per call, so one
+        // source pull can leave bytes in transfer that a single drain would strand there.
+        while (byteBuffer.hasRemaining() && transfer.size > 0L) {
+            sent += transfer.read(byteBuffer)
         }
         report()
         uploadDataSink.onReadSucceeded(total < 0 && exhausted)

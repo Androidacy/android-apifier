@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.0.2
+
+### Fixed
+
+- Requests with a body larger than 8 KB and a known length (a POST with a sizeable JSON payload,
+  for example) could fail the upload instead of completing it.
+
 ## 3.0.1
 
 ### Fixed

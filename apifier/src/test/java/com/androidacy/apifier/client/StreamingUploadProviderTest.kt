@@ -109,6 +109,36 @@ class StreamingUploadProviderTest {
         assertEquals(listOf(false, false, false), sink.readSucceededCalls)
     }
 
+    /**
+     * Reproduces the on-device crash: a known-length body over one okio segment (8192 bytes),
+     * read with Cronet-sized buffers also over one segment. 20,000 bytes at 12,000 per buffer is
+     * 12,000 then 8,000 — exactly two reads, both under `total`, so neither may be zero-byte.
+     */
+    @Test
+    fun knownLengthBodyLargerThanOneSegmentUploadsWithoutAZeroByteRead() {
+        val totalLength = 20_000
+        val bytes = ByteArray(totalLength) { (it % 256).toByte() }
+        val provider = StreamingUploadProvider(bytes.toRequestBody(null), null)
+        val sink = RecordingSink()
+        val received = Buffer()
+
+        var calls = 0
+        while (received.size < totalLength) {
+            check(calls < 10) { "runaway upload read loop" }
+            val buffer = ByteBuffer.allocate(12_000)
+            provider.read(sink, buffer)
+            calls++
+            assertNull("unexpected read error", sink.readError)
+            buffer.flip()
+            assertTrue("a non-final read for a known-length body must never be zero-byte", buffer.hasRemaining())
+            received.write(buffer)
+        }
+
+        assertEquals(2, calls)
+        assertEquals(listOf(false, false), sink.readSucceededCalls)
+        assertArrayEquals(bytes, received.readByteArray())
+    }
+
     @Test
     fun chunkedSignalsFinalChunk() {
         val source = CountingSource(40L)

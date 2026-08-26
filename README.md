@@ -44,7 +44,7 @@ Add dependency:
 
 ```gradle
 dependencies {
-    implementation 'com.github.Androidacy:android-apifier:3.0.1'
+    implementation 'com.github.Androidacy:android-apifier:3.0.2'
 }
 ```
 
