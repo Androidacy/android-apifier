@@ -89,10 +89,16 @@ jobs:
 
       - if: steps.ver.outputs.release == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          SERVER: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
         run: |
-          gh release create "${{ steps.ver.outputs.version }}" \
-            --title "${{ steps.ver.outputs.version }}" \
-            --target "${{ github.sha }}" \
-            --generate-notes \
-            --notes "See release notes at https://github.com/${{ github.repository }}/blob/${{ steps.ver.outputs.version }}/CHANGELOG.md"
+          printf '{"tag_name":"%s","target_commitish":"%s","name":"%s","body":"See release notes at %s/%s/src/tag/%s/CHANGELOG.md"}' \
+            "$VERSION" "$SHA" "$VERSION" "$SERVER" "$REPO" "$VERSION" > /tmp/release.json
+          curl -sSf -X POST \
+            -H "Authorization: token $TOKEN" \
+            -H "Content-Type: application/json" \
+            --data @/tmp/release.json \
+            "$SERVER/api/v1/repos/$REPO/releases" >/dev/null
