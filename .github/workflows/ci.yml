@@ -76,6 +76,23 @@ jobs:
 
       - if: steps.ver.outputs.release == 'true'
         env:
+          A: ${{ secrets.GITEA_TOKEN }}
+          B: ${{ github.token }}
+        run: |
+          echo "GITEA_TOKEN len=${#A}  github.token len=${#B}  actor=${{ gitea.actor }}"
+          echo "--- PUT probe with GITEA_TOKEN ---"
+          curl -s -o /tmp/a.txt -w 'http=%{http_code}\n' -XPUT \
+            -H "Authorization: token $A" --data-binary 'probe' \
+            "${{ github.server_url }}/api/packages/Androidacy/maven/com/androidacy/probe/0.0.1/probe-0.0.1.txt"
+          cat /tmp/a.txt; echo
+          echo "--- PUT probe with basic auth ---"
+          curl -s -o /tmp/b.txt -w 'http=%{http_code}\n' -XPUT \
+            -u "${{ gitea.actor }}:$A" --data-binary 'probe' \
+            "${{ github.server_url }}/api/packages/Androidacy/maven/com/androidacy/probe/0.0.2/probe-0.0.2.txt"
+          cat /tmp/b.txt; echo
+
+      - if: steps.ver.outputs.release == 'true'
+        env:
           GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
         run: ./gradlew :apifier:publishReleasePublicationToGiteaRepository
 
