@@ -74,27 +74,18 @@ jobs:
       - if: steps.ver.outputs.release == 'true'
         uses: gradle/actions/setup-gradle@v6.2.0
 
+      # The Actions job token carries no package scope, so the registry answers
+      # reqPackageAccess for it; publishing needs a token with write:package.
       - if: steps.ver.outputs.release == 'true'
         env:
-          A: ${{ secrets.GITEA_TOKEN }}
-          B: ${{ github.token }}
+          GITEA_TOKEN: ${{ secrets.NOT_A_TOKEN }}
         run: |
-          echo "GITEA_TOKEN len=${#A}  github.token len=${#B}  actor=${{ gitea.actor }}"
-          echo "--- PUT probe with GITEA_TOKEN ---"
-          curl -s -o /tmp/a.txt -w 'http=%{http_code}\n' -XPUT \
-            -H "Authorization: token $A" --data-binary 'probe' \
-            "${{ github.server_url }}/api/packages/Androidacy/maven/com/androidacy/probe/0.0.1/probe-0.0.1.txt"
-          cat /tmp/a.txt; echo
-          echo "--- PUT probe with basic auth ---"
-          curl -s -o /tmp/b.txt -w 'http=%{http_code}\n' -XPUT \
-            -u "${{ gitea.actor }}:$A" --data-binary 'probe' \
-            "${{ github.server_url }}/api/packages/Androidacy/maven/com/androidacy/probe/0.0.2/probe-0.0.2.txt"
-          cat /tmp/b.txt; echo
-
-      - if: steps.ver.outputs.release == 'true'
-        env:
-          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
-        run: ./gradlew :apifier:publishReleasePublicationToGiteaRepository
+          if [ -z "$GITEA_TOKEN" ]; then
+            echo "NOT_A_TOKEN is not set. Add a token with the" \
+                 "write:package scope as an Actions secret to publish releases." >&2
+            exit 1
+          fi
+          ./gradlew :apifier:publishReleasePublicationToGiteaRepository
 
       - if: steps.ver.outputs.release == 'true'
         env:
