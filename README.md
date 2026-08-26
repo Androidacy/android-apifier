@@ -1,12 +1,12 @@
 # Android Apifier
 
-[![Release](https://img.shields.io/github/v/release/Androidacy/android-apifier?sort=semver)](https://github.com/Androidacy/android-apifier/releases/latest)
+[![Release](https://img.shields.io/gitea/v/release/Androidacy/android-apifier?gitea_url=https%3A%2F%2Fgit.androidacy.com)](https://git.androidacy.com/Androidacy/android-apifier/releases/latest)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 HTTP and API networking library for Android, built directly on Cronet.
 
-Upgrading from 2.x is a breaking change. [CHANGELOG.md](CHANGELOG.md) names every symbol that was
-removed or renamed, so a build error can be searched for by the symbol it names.
+Upgrading from 2.x is a breaking change. [CHANGELOG.md](CHANGELOG.md) lists every removed and
+renamed symbol.
 
 ## Features
 
